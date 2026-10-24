@@ -1,0 +1,39 @@
+[package]
+name = "rzp"
+version = "1.6.0"
+edition = "2021"
+description = "RZP — a from-scratch, streaming, integrity-checked compression format"
+authors = ["张俊琦 <mokaifurry@outlook.com>"]
+license = "MIT OR Apache-2.0"
+keywords = ["compression", "lz77", "huffman", "aead", "archive"]
+categories = ["compression", "command-line-utilities"]
+# 发布到 crates.io 时排除本地产物、模糊测试语料与打包脚本。
+exclude = [
+    "fuzz/",
+    "dist/",
+    "target/",
+    "package.sh",
+]
+
+[lib]
+name = "rzp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rzp"
+path = "src/bin/rzp.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+[profile.dev]
+opt-level = 1
+
+[package.metadata.deb]
+maintainer = "张俊琦 <mokaifurry@outlook.com>"
+copyright = "2026 张俊琦 <mokaifurry@outlook.com>"
+license-file = "LICENSE"
+section = "utils"
+priority = "optional"

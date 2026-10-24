@@ -1,0 +1,105 @@
+.TH RZP 1 "2026-10-23" "rzp 1.6.0" "用户命令"
+.SH 名称
+rzp \- 流式、带完整性校验的压缩工具
+.SH 语法
+.B rzp
+.I 命令
+.RI [ 选项 "] [ " 输入 "...]"
+.SH 描述
+RZP 是一套从零实现的文件压缩方案：LZ77 匹配 + 限长规范 Huffman 熵编码，
+带 CRC-32 完整性校验、ChaCha20-Poly1305 密码加密、可调压缩级别与流式 API。
+.SH 命令
+.TP
+.B c
+压缩文件或目录（目录打包为单个 .rzp）。
+.TP
+.B d
+解压文件或目录归档（目录输入递归处理其中的 .rzp）。
+.TP
+.B i
+查看归档信息（不解压）。
+.TP
+.B l
+列出目录归档内容（不解出内容）。
+.TP
+.B t
+校验文件完整性（不解出内容）。
+.TP
+.B x
+从目录归档随机抽取单个条目。
+.TP
+.B bench
+与 gzip/zstd 对比压缩率与速度（输入可为文件或目录）。
+.TP
+.B completion
+输出 shell 补全脚本（bash/zsh/fish）。
+.TP
+.B --help
+显示帮助。
+.TP
+.B --version
+显示版本。
+.SH 选项
+.TP
+.BR \-o " 路径"
+指定输出文件（仅单个输入）。
+.TP
+.BR \-l " 0-9"
+压缩级别（仅 c，默认 6）。
+.TP
+.BR \-b " 块大小"
+目标块大小（字节，仅 c，默认 1048576，上限 67108864）。
+.TP
+.BR \-j " 线程数"
+工作线程数（默认按 CPU 核数自动检测）。
+.TP
+.BR \-D " 字典文件"
+预设字典（压缩/解压共用，提升小文件压缩率）。
+.TP
+.BR \-p " 密码"
+用密码加密（c）或处理加密归档（d/i/l/t）。
+.TP
+.BR --password " 密码"
+同 \-p（密码会出现在进程列表，注意安全）。
+.TP
+.BR --password-file " 路径"
+从文件读取密码（忽略末尾换行）。
+.TP
+.B --ask-pass
+交互式输入密码（无回显）。
+.TP
+.BR --include " 模式"
+仅处理匹配该通配模式的路径（可多次，* / ?）。
+.TP
+.BR --exclude " 模式"
+跳过匹配该通配模式的路径（可多次，* / ?）。
+.TP
+.BR \-f ", " --force
+允许覆盖已存在的输出文件。
+.TP
+.BR \-k ", " --keep
+保留输入文件（默认压缩/解压成功后删除输入文件）。
+.TP
+.BR \-c ", " --progress
+显示进度条。
+.SH 环境变量
+.TP
+.B RZP_PASSWORD
+提供密码（优先级低于 \-p/--password/--password-file 等显式选项）。
+.SH 示例
+压缩：\fBrzp c input.txt\fR（生成 input.txt.rzp）
+.br
+带密码：\fBrzp c -p secret input.txt\fR
+.br
+解压：\fBrzp d input.txt.rzp\fR
+.br
+目录打包：\fBrzp c dir/\fR
+.br
+列出目录归档：\fBrzp l dir.rzp\fR
+.br
+生成 bash 补全：\fBrzp completion bash\fR
+.SH 退出码
+0 表示成功，非 0 表示出错（含认证失败、校验失败等）。
+.SH 参见
+.BR rzp (1),
+README.md、FORMAT.md（格式规范）、API.md（库 API）。

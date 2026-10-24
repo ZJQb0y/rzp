@@ -1,0 +1,5 @@
+# 构建产物（含根目录与 fuzz/ 下的 target）
+target/
+
+# 打包产物（package.sh 输出）
+dist/
