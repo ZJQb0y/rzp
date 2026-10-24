@@ -7,6 +7,14 @@
 
 ## [Unreleased]
 
+### 工程化
+
+- 支持单语言多平台编译：目录归档的 Unix 专属能力（xattr、属主、权限、符号链接、
+  硬链接、稀疏文件）按平台抽象，新增 Windows 交叉编译支持；`package.sh` 同时产出
+  Linux 与 Windows 可移植包，并在装有 NSIS 时生成 Windows 安装包（`*-setup.exe`）。
+- 为 Windows 的 `rzp.exe` 嵌入图标与文件版本资源（`build.rs`，MSVC 用 `rc.exe`、
+  mingw 交叉编译用 `windres`），并保留 `package.ps1` 供 Windows 用户原生打包。
+
 ## [1.6.0] - 2026-10-23
 
 ### 新增
@@ -62,5 +70,12 @@
 | `Cargo.toml` | `version` |
 | `API.md` | 头部 `rzp <版本>` |
 | `man/rzp.1` | `.TH` 行中的 `rzp <版本>` 与日期 |
-| `README.md` | 克隆路径 `RZP_linux_<版本>` |
+| `README.md` | 克隆路径 `RZP_<版本>` |
 | 若破坏格式 | `src/format.rs` 的 `VERSION` 与 `FORMAT.md` |
+
+## [1.7.0] - 2026-10-24
+
+### [新增]
+
+- 为RZP增加了彭罗斯三角的图标
+- 新增了i18n模块

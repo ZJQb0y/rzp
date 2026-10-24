@@ -5,15 +5,201 @@
 //! 不跟随符号链接；特殊文件（fifo/socket/设备）会被跳过。
 
 use std::collections::HashMap;
-use std::ffi::OsStr;
-use std::fs::{self, File, FileTimes, Permissions};
+use std::fs::{self, File, FileTimes};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{chown, lchown, symlink, MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use crate::{Error, Level};
+
+/// 平台差异封装：路径字节、元数据字段、属主/权限/符号链接。
+///
+/// 归档容器以「原始 OS 字节」记录路径名；Unix 上是原生字节，Windows 上是
+/// `OsStr::as_encoded_bytes()` 产出的 WTF-8 字节，二者在各自平台上回放即可。
+mod platform {
+    use std::fs;
+    use std::io;
+    use std::path::{Path, PathBuf};
+
+    /// 把路径表示为原始字节（Unix：原生字节；Windows：WTF-8）。
+    #[cfg(unix)]
+    pub fn path_bytes(path: &Path) -> &[u8] {
+        use std::os::unix::ffi::OsStrExt;
+        path.as_os_str().as_bytes()
+    }
+
+    #[cfg(windows)]
+    pub fn path_bytes(path: &Path) -> &[u8] {
+        path.as_os_str().as_encoded_bytes()
+    }
+
+    /// 把原始字节解释为路径（借用）。
+    #[cfg(unix)]
+    pub fn path_from_bytes(bytes: &[u8]) -> &Path {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        Path::new(OsStr::from_bytes(bytes))
+    }
+
+    #[cfg(windows)]
+    pub fn path_from_bytes(bytes: &[u8]) -> &Path {
+        use std::ffi::OsStr;
+        // 字节源自同一平台的 `as_encoded_bytes`，满足 unsafe 契约。
+        Path::new(unsafe { OsStr::from_encoded_bytes_unchecked(bytes) })
+    }
+
+    /// 把原始字节解释为拥有所有权的路径。
+    pub fn path_owned_from_bytes(bytes: &[u8]) -> PathBuf {
+        path_from_bytes(bytes).to_path_buf()
+    }
+
+    #[cfg(unix)]
+    pub fn meta_mode(meta: &fs::Metadata) -> u32 {
+        use std::os::unix::fs::MetadataExt;
+        (meta.mode() & 0o7777) as u32
+    }
+
+    #[cfg(windows)]
+    pub fn meta_mode(_meta: &fs::Metadata) -> u32 {
+        0
+    }
+
+    #[cfg(unix)]
+    pub fn meta_uid(meta: &fs::Metadata) -> u32 {
+        use std::os::unix::fs::MetadataExt;
+        meta.uid()
+    }
+
+    #[cfg(windows)]
+    pub fn meta_uid(_meta: &fs::Metadata) -> u32 {
+        0
+    }
+
+    #[cfg(unix)]
+    pub fn meta_gid(meta: &fs::Metadata) -> u32 {
+        use std::os::unix::fs::MetadataExt;
+        meta.gid()
+    }
+
+    #[cfg(windows)]
+    pub fn meta_gid(_meta: &fs::Metadata) -> u32 {
+        0
+    }
+
+    #[cfg(unix)]
+    pub fn meta_mtime_sec(meta: &fs::Metadata) -> i64 {
+        use std::os::unix::fs::MetadataExt;
+        meta.mtime()
+    }
+
+    #[cfg(windows)]
+    pub fn meta_mtime_sec(meta: &fs::Metadata) -> i64 {
+        modified_parts(meta).0
+    }
+
+    #[cfg(unix)]
+    pub fn meta_mtime_nsec(meta: &fs::Metadata) -> u32 {
+        use std::os::unix::fs::MetadataExt;
+        meta.mtime_nsec() as u32
+    }
+
+    #[cfg(windows)]
+    pub fn meta_mtime_nsec(meta: &fs::Metadata) -> u32 {
+        modified_parts(meta).1
+    }
+
+    #[cfg(windows)]
+    fn modified_parts(meta: &fs::Metadata) -> (i64, u32) {
+        use std::time::UNIX_EPOCH;
+        match meta.modified() {
+            Ok(t) => match t.duration_since(UNIX_EPOCH) {
+                Ok(d) => (d.as_secs() as i64, d.subsec_nanos()),
+                Err(_) => (0, 0),
+            },
+            Err(_) => (0, 0),
+        }
+    }
+
+    /// inode 键，用于硬链接去重。Windows 无此概念，恒返回 `(0, 0)`。
+    #[cfg(unix)]
+    pub fn meta_inode_key(meta: &fs::Metadata) -> (u64, u64) {
+        use std::os::unix::fs::MetadataExt;
+        (meta.dev(), meta.ino())
+    }
+
+    #[cfg(windows)]
+    pub fn meta_inode_key(_meta: &fs::Metadata) -> (u64, u64) {
+        (0, 0)
+    }
+
+    #[cfg(unix)]
+    pub fn meta_nlink(meta: &fs::Metadata) -> u64 {
+        use std::os::unix::fs::MetadataExt;
+        meta.nlink()
+    }
+
+    #[cfg(windows)]
+    pub fn meta_nlink(_meta: &fs::Metadata) -> u64 {
+        1
+    }
+
+    /// 稀疏判定：实际分配块字节数小于逻辑大小。Windows 不判定，恒返回 false。
+    #[cfg(unix)]
+    pub fn is_sparse(meta: &fs::Metadata) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        meta.blocks().saturating_mul(512) < meta.len()
+    }
+
+    #[cfg(windows)]
+    pub fn is_sparse(_meta: &fs::Metadata) -> bool {
+        false
+    }
+
+    #[cfg(unix)]
+    pub fn set_owner(path: &Path, uid: Option<u32>, gid: Option<u32>) {
+        use std::os::unix::fs::chown;
+        let _ = chown(path, uid, gid);
+    }
+
+    #[cfg(windows)]
+    pub fn set_owner(_path: &Path, _uid: Option<u32>, _gid: Option<u32>) {}
+
+    #[cfg(unix)]
+    pub fn lchown(path: &Path, uid: Option<u32>, gid: Option<u32>) {
+        use std::os::unix::fs::lchown;
+        let _ = lchown(path, uid, gid);
+    }
+
+    #[cfg(windows)]
+    pub fn lchown(_path: &Path, _uid: Option<u32>, _gid: Option<u32>) {}
+
+    #[cfg(unix)]
+    pub fn set_mode(path: &Path, mode: u32) {
+        use std::fs::Permissions;
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, Permissions::from_mode(mode));
+    }
+
+    #[cfg(windows)]
+    pub fn set_mode(_path: &Path, _mode: u32) {}
+
+    /// 创建符号链接。Windows 上符号链接需要权限，先按文件、再按目录尝试。
+    #[cfg(unix)]
+    pub fn create_symlink(link: &[u8], target: &Path) -> io::Result<()> {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::symlink;
+        symlink(OsStr::from_bytes(link), target)
+    }
+
+    #[cfg(windows)]
+    pub fn create_symlink(link: &[u8], target: &Path) -> io::Result<()> {
+        use std::ffi::OsStr;
+        use std::os::windows::fs::{symlink_dir, symlink_file};
+        let link = Path::new(unsafe { OsStr::from_encoded_bytes_unchecked(link) });
+        symlink_file(link, target).or_else(|_| symlink_dir(link, target))
+    }
+}
 
 const TYPE_FILE: u8 = 0;
 const TYPE_DIR: u8 = 1;
@@ -65,8 +251,8 @@ fn write_tree<W: Write>(
         if !filter(rel, ft.is_dir()) {
             continue;
         }
-        let name = rel.as_os_str().as_bytes();
-        let mode = (meta.mode() & 0o7777) as u32;
+        let name = platform::path_bytes(rel);
+        let mode = platform::meta_mode(&meta);
 
         if ft.is_dir() {
             write_entry(
@@ -74,8 +260,8 @@ fn write_tree<W: Write>(
                 TYPE_DIR,
                 name,
                 mode,
-                meta.mtime(),
-                meta.mtime_nsec() as u32,
+                platform::meta_mtime_sec(&meta),
+                platform::meta_mtime_nsec(&meta),
                 0,
             )?;
             write_tree(root, &path, out, filter)?;
@@ -86,15 +272,15 @@ fn write_tree<W: Write>(
                 TYPE_FILE,
                 name,
                 mode,
-                meta.mtime(),
-                meta.mtime_nsec() as u32,
+                platform::meta_mtime_sec(&meta),
+                platform::meta_mtime_nsec(&meta),
                 size,
             )?;
             let mut f = File::open(&path)?;
             io::copy(&mut f, out)?;
         } else if ft.is_symlink() {
             let target = fs::read_link(&path)?;
-            let target = target.as_os_str().as_bytes();
+            let target = platform::path_bytes(&target);
             write_entry(out, TYPE_SYMLINK, name, 0, 0, 0, target.len() as u64)?;
             out.write_all(target)?;
         }
@@ -143,7 +329,7 @@ pub struct Entry {
 impl Entry {
     /// 条目的相对路径（按原始字节解释为 OS 路径）。
     pub fn path(&self) -> &Path {
-        Path::new(OsStr::from_bytes(&self.name))
+        platform::path_from_bytes(&self.name)
     }
 
     /// 类型的人类可读名。
@@ -249,7 +435,7 @@ fn extract_entry<R: Read>(input: &mut R, e: &Entry, dest: &Path) -> io::Result<(
                 Ok(_) => fs::remove_file(&target)?,
                 Err(_) => {}
             }
-            symlink(OsStr::from_bytes(&link), &target)?;
+            platform::create_symlink(&link, &target)?;
         }
         other => {
             return Err(io::Error::new(
@@ -275,7 +461,7 @@ fn copy_n<R: Read, W: Write>(input: &mut R, out: &mut W, mut n: u64) -> io::Resu
 
 /// 把归档里的路径名解析为安全的相对路径，拒绝绝对路径与 `..` 穿越。
 fn sanitize_name(name: &[u8]) -> io::Result<PathBuf> {
-    let path = PathBuf::from(OsStr::from_bytes(name));
+    let path = platform::path_owned_from_bytes(name);
     for comp in path.components() {
         match comp {
             Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
@@ -302,9 +488,9 @@ fn set_meta(
     mtime_nsec: u32,
 ) {
     // chown 可能清除 setuid/setgid，故先 chown 再 chmod。
-    let _ = chown(path, uid, gid);
+    platform::set_owner(path, uid, gid);
     if mode != 0 {
-        let _ = fs::set_permissions(path, Permissions::from_mode(mode));
+        platform::set_mode(path, mode);
     }
     let secs = mtime_sec.max(0) as u64;
     if let Some(t) = UNIX_EPOCH.checked_add(std::time::Duration::new(secs, mtime_nsec)) {
@@ -365,7 +551,7 @@ pub struct IndexEntry {
 impl IndexEntry {
     /// 条目的相对路径（按原始字节解释为 OS 路径）。
     pub fn path(&self) -> &Path {
-        Path::new(OsStr::from_bytes(&self.name))
+        platform::path_from_bytes(&self.name)
     }
 
     /// 类型的人类可读名。
@@ -486,12 +672,12 @@ fn write_indexed_tree<W: Write>(
         if !filter(rel, ft.is_dir()) {
             continue;
         }
-        let name = rel.as_os_str().as_bytes().to_vec();
-        let mode = (meta.mode() & 0o7777) as u32;
-        let uid = meta.uid();
-        let gid = meta.gid();
-        let mtime_sec = meta.mtime();
-        let mtime_nsec = meta.mtime_nsec() as u32;
+        let name = platform::path_bytes(rel).to_vec();
+        let mode = platform::meta_mode(&meta);
+        let uid = platform::meta_uid(&meta);
+        let gid = platform::meta_gid(&meta);
+        let mtime_sec = platform::meta_mtime_sec(&meta);
+        let mtime_nsec = platform::meta_mtime_nsec(&meta);
 
         if ft.is_dir() {
             let xblob = serialize_xattrs(&read_xattrs(&path));
@@ -533,8 +719,8 @@ fn write_indexed_tree<W: Write>(
             )?;
         } else if ft.is_file() {
             // 硬链接：nlink > 1 且 inode 已收录过 → 记为指向首个出现路径的 hardlink。
-            let inode_key = (meta.dev(), meta.ino());
-            if meta.nlink() > 1 {
+            let inode_key = platform::meta_inode_key(&meta);
+            if platform::meta_nlink(&meta) > 1 {
                 if let Some(target) = seen.get(&inode_key) {
                     let blob = target.clone();
                     write_entry_header(
@@ -577,7 +763,7 @@ fn write_indexed_tree<W: Write>(
 
             let xblob = serialize_xattrs(&read_xattrs(&path));
             let size = meta.len();
-            let (flags, method, blob) = if is_sparse(&meta) {
+            let (flags, method, blob) = if platform::is_sparse(&meta) {
                 let payload = serialize_sparse(&read_sparse_extents(&path, size)?);
                 let comp = compress_bytes(&payload, level, dict, threads, strong);
                 if comp.len() < payload.len() {
@@ -631,7 +817,7 @@ fn write_indexed_tree<W: Write>(
             });
         } else if ft.is_symlink() {
             let target = fs::read_link(&path)?;
-            let blob = target.as_os_str().as_bytes().to_vec();
+            let blob = platform::path_bytes(&target).to_vec();
             let size = blob.len() as u64;
             write_entry_header(
                 out,
@@ -799,11 +985,6 @@ fn deserialize_xattrs(mut blob: &[u8]) -> io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
         out.push((name, value));
     }
     Ok(out)
-}
-
-/// 稀疏判定：实际分配的块字节数小于逻辑大小。
-fn is_sparse(meta: &fs::Metadata) -> bool {
-    meta.blocks().saturating_mul(512) < meta.len()
 }
 
 /// 稀疏块扫描粒度（字节）。
@@ -1106,8 +1287,8 @@ pub fn extract_indexed_entry<R: Read + Seek>(
             }
             let link = read_entry_payload(r, e, dict, threads)?;
             remove_existing(&target)?;
-            symlink(OsStr::from_bytes(&link), &target)?;
-            let _ = lchown(&target, Some(e.uid), Some(e.gid));
+            platform::create_symlink(&link, &target)?;
+            platform::lchown(&target, Some(e.uid), Some(e.gid));
         }
         TYPE_HARDLINK => {
             if let Some(parent) = target.parent() {
@@ -1140,7 +1321,7 @@ pub fn extract_indexed_path<R: Read + Seek>(
     dict: &[u8],
     threads: usize,
 ) -> crate::Result<()> {
-    let needle = name.as_os_str().as_bytes();
+    let needle = platform::path_bytes(name);
     let entries = read_index(r)?;
     let e = entries
         .iter()
@@ -1149,10 +1330,11 @@ pub fn extract_indexed_path<R: Read + Seek>(
     extract_indexed_entry(r, e, dest, dict, threads)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod indexed_tests {
     use super::*;
     use std::io::Cursor;
+    use std::os::unix::fs::MetadataExt;
 
     fn tmpdir(tag: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()

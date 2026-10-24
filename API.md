@@ -1,6 +1,6 @@
 # RZP 库 API 参考
 
-> 版本：`rzp 1.6.0`。crate 名 `rzp`，主入口 `src/lib.rs`。
+> 版本：`rzp 1.7.0`。crate 名 `rzp`，主入口 `src/lib.rs`。
 > 零第三方依赖，`std` only。
 
 ```rust

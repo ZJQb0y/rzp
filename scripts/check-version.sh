@@ -30,7 +30,7 @@ check() {
 
 check "API.md"    "rzp ${VERSION}"
 check "man/rzp.1" "rzp ${VERSION}"
-check "README.md" "RZP_linux_${VERSION}"
+check "README.md" "RZP_${VERSION}"
 
 if [ "$fail" -ne 0 ]; then
     echo "版本号不一致，请统一为 ${VERSION}。" >&2

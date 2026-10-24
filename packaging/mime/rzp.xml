@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+    <mime-type type="application/x-rzp">
+        <comment>RZP compressed archive</comment>
+        <comment xml:lang="zh_CN">RZP 压缩归档</comment>
+        <glob pattern="*.rzp"/>
+        <magic priority="50">
+            <match value="RZP" type="string" offset="0"/>
+        </magic>
+    </mime-type>
+</mime-info>

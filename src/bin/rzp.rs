@@ -8,6 +8,21 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use rzp::{Decoder, Encoder, Level, Result};
 
+#[path = "rzp/i18n.rs"]
+mod i18n;
+
+/// 用模板中的 `{}` 占位符依次替换参数（参数自动字符串化）。
+macro_rules! tr {
+    ($template:expr $(, $arg:expr)* $(,)?) => {
+        i18n::fmt($template, &[$($arg.to_string()),*])
+    };
+}
+
+/// 当前语言的文案表（自动检测系统语言，结果缓存）。
+fn msgs() -> &'static i18n::Messages {
+    i18n::messages()
+}
+
 /// 终端 ANSI 颜色支持：零依赖，非终端（重定向/管道）自动禁用。
 mod style {
     use std::io::IsTerminal;
@@ -54,67 +69,10 @@ mod style {
     }
 }
 
-const USAGE: &str = "\
-RZP 压缩工具
-
-用法:
-  rzp c [选项] <输入>...    压缩文件或目录（目录打包为单个 .rzp）
-  rzp d [选项] <输入>...    解压文件或目录归档（目录输入递归处理其中的 .rzp）
-  rzp i <输入>...           查看归档信息（不解压）
-  rzp l <输入>...           列出目录归档内容（不解出内容）
-  rzp t <输入>...           校验文件完整性（不解出内容）
-  rzp x <归档> <条目路径>    从目录归档随机抽取单个条目
-  rzp bench [选项] <输入>...  与 gzip/zstd 对比压缩率与速度（文件或目录）
-  rzp completion <shell>    输出 shell 补全脚本（bash/zsh/fish）
-  rzp --help                显示帮助
-  rzp --version             显示版本
-
-输入/输出路径可用 \"-\" 表示 stdin/stdout（仅限单个输入）。
-
-命令选项 (c / d):
-  -o <路径>       指定输出文件（仅单个输入）
-  -l <0-9>        压缩级别（仅 c，默认 6）
-  -b <块大小>     目标块大小（字节，仅 c，默认 1048576，上限 67108864）
-  -j <线程数>     工作线程数（默认按 CPU 核数自动检测）
-  -D <字典文件>   预设字典（压缩/解压共用，提升小文件压缩率）
-  -p <密码>       用密码加密（c）或处理加密归档（d/i/l/t）
-  --password <密码>  同 -p（密码会出现在进程列表，注意安全）
-  --password-file <路径>  从文件读取密码（忽略末尾换行）
-  --ask-pass       交互式输入密码（无回显）
-  （环境变量 RZP_PASSWORD 也可提供密码，优先级低于上述显式选项）
-  --argon2-memory <KiB>  Argon2id 内存成本（仅 c，默认 65536，上限 2097152）
-  --argon2-iters <n>     Argon2id 迭代次数（仅 c，默认 3，上限 1024）
-  --argon2-lanes <n>     Argon2id 并行度（仅 c，默认 4，上限 256）
-  --strong-checksum     使用 BLAKE2b-256 强校验（仅 c，默认 CRC-32）
-  --include <模式>  仅处理匹配该通配模式的路径（可多次，`*`/`?`）
-  --exclude <模式>  跳过匹配该通配模式的路径（可多次，`*`/`?`）
-  -f, --force     允许覆盖已存在的输出文件
-  -k, --keep      保留输入文件（默认压缩/解压成功后删除输入文件）
-  -c, --progress  显示进度条
-
-示例:
-  rzp c data.txt              -> 生成 data.txt.rzp（删除 data.txt）
-  rzp c -k data.txt           -> 生成 data.txt.rzp（保留 data.txt）
-  rzp c -l 9 -o out data.txt  -> 以最高级别压缩到 out
-  rzp c -D dict.bin x.txt     -> 用预设字典压缩
-  rzp c -p secret data.txt    -> 用密码加密压缩
-  rzp c dir/                  -> 把目录打包为 dir.rzp（保留目录结构/空目录/符号链接/权限/时间戳）
-  rzp d -D dict.bin x.rzp     -> 用预设字典解压
-  rzp d -p secret x.rzp       -> 用密码解压
-  rzp d data.txt.rzp          -> 解压回 data.txt（删除 data.txt.rzp）
-  rzp d dir.rzp               -> 还原目录结构到 dir/
-  rzp d dir/                  -> 递归解压目录下所有 .rzp 文件
-  rzp i archive.rzp           -> 查看归档信息
-  rzp i -p secret archive.rzp -> 查看加密归档信息
-  rzp t archive.rzp           -> 校验完整性
-  rzp t -p secret archive.rzp -> 校验加密归档
-  cat a.txt | rzp c - > a.rzp -> 从 stdin 压缩到 stdout
-";
-
-/// 把 USAGE 渲染为带颜色的文本；`tty` 为真时上色，否则输出纯文本。
+/// 把帮助文本渲染为带颜色的文本；`tty` 为真时上色，否则输出纯文本。
 fn render_usage(tty: bool) -> String {
     let mut out = String::new();
-    for line in USAGE.lines() {
+    for line in msgs().usage.lines() {
         out.push_str(&highlight_line(line, tty));
         out.push('\n');
     }
@@ -176,7 +134,7 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!(
                 "{}: {}",
-                style::paint("错误", style::Color::Red, style::stderr_tty()),
+                style::paint(msgs().error, style::Color::Red, style::stderr_tty()),
                 format_error(&e)
             );
             ExitCode::FAILURE
@@ -187,11 +145,8 @@ fn main() -> ExitCode {
 /// 把库错误映射为清晰的中文提示。
 fn format_error(e: &rzp::Error) -> String {
     match e {
-        rzp::Error::PasswordRequired => {
-            "归档已加密，请用 -p/--password/--password-file/RZP_PASSWORD 或 --ask-pass 提供密码"
-                .to_string()
-        }
-        rzp::Error::AuthFailed => "密码错误或归档数据被篡改（认证失败）".to_string(),
+        rzp::Error::PasswordRequired => msgs().err_password_required.to_string(),
+        rzp::Error::AuthFailed => msgs().err_auth_failed.to_string(),
         other => other.to_string(),
     }
 }
@@ -214,12 +169,10 @@ fn resolve_password(opts: &Opts, prompt_if_missing: bool) -> Result<Option<Strin
         }
     }
     if prompt_if_missing && std::io::stdin().is_terminal() {
-        return prompt_password("请输入密码: ").map(Some);
+        return prompt_password(msgs().prompt_password).map(Some);
     }
     if opts.ask_pass && !std::io::stdin().is_terminal() {
-        return Err(rzp::Error::Io(
-            "--ask-pass 需要交互式终端（stdin 不是终端）".into(),
-        ));
+        return Err(rzp::Error::Io(msgs().ask_pass_requires_tty.into()));
     }
     Ok(None)
 }
@@ -227,7 +180,7 @@ fn resolve_password(opts: &Opts, prompt_if_missing: bool) -> Result<Option<Strin
 /// 读取 `--password-file` 指定的密码文件，忽略末尾单个换行/回车。
 fn read_password_file(path: &Path) -> Result<String> {
     let raw = std::fs::read(path)
-        .map_err(|e| rzp::Error::Io(format!("无法读取密码文件 {}: {e}", path.display())))?;
+        .map_err(|e| rzp::Error::Io(tr!(msgs().cannot_read_password_file, path.display(), e)))?;
     Ok(String::from_utf8_lossy(&raw)
         .trim_end_matches(['\n', '\r'])
         .to_string())
@@ -240,7 +193,7 @@ fn prompt_password(prompt: &str) -> Result<String> {
     let pw = read_password_no_echo()?;
     eprintln!();
     if pw.is_empty() {
-        return Err(rzp::Error::Io("密码不能为空".into()));
+        return Err(rzp::Error::Io(msgs().password_empty.into()));
     }
     Ok(pw)
 }
@@ -339,7 +292,12 @@ fn run() -> Result<()> {
         "x" => cmd_extract(&args[1..]),
         "bench" => cmd_bench(&args[1..]),
         "completion" | "completions" => cmd_completion(&args[1..]),
-        other => Err(rzp::Error::Io(format!("未知命令: {other}\n\n{USAGE}"))),
+        other => Err(rzp::Error::Io(format!(
+            "{}: {}\n\n{}",
+            msgs().unknown_command,
+            other,
+            msgs().usage
+        ))),
     }
 }
 
@@ -402,31 +360,31 @@ fn parse_opts(args: &[String]) -> Result<(Opts, Vec<String>)> {
             "-o" => {
                 i += 1;
                 if i >= args.len() {
-                    return Err(rzp::Error::Io("-o 需要一个路径参数".into()));
+                    return Err(rzp::Error::Io(msgs().opt_o_requires_path.into()));
                 }
                 output = Some(PathBuf::from(&args[i]));
             }
             "-l" => {
                 i += 1;
                 if i >= args.len() {
-                    return Err(rzp::Error::Io("-l 需要一个 0-9 的级别参数".into()));
+                    return Err(rzp::Error::Io(msgs().opt_l_requires_level.into()));
                 }
                 let lvl: u8 = args[i]
                     .parse()
-                    .map_err(|_| rzp::Error::Io(format!("无效的压缩级别: {}", args[i])))?;
+                    .map_err(|_| rzp::Error::Io(tr!(msgs().invalid_level, args[i])))?;
                 level = Level::from_u8(lvl);
             }
             "-b" | "--block-size" => {
                 i += 1;
                 if i >= args.len() {
-                    return Err(rzp::Error::Io("-b/--block-size 需要一个块大小参数".into()));
+                    return Err(rzp::Error::Io(msgs().opt_b_requires_size.into()));
                 }
                 let n: usize = args[i]
                     .parse()
-                    .map_err(|_| rzp::Error::Io(format!("无效的块大小: {}", args[i])))?;
+                    .map_err(|_| rzp::Error::Io(tr!(msgs().invalid_block_size, args[i])))?;
                 if n == 0 || n > rzp::MAX_BLOCK_SIZE {
-                    return Err(rzp::Error::Io(format!(
-                        "块大小必须在 1..={} 之间",
+                    return Err(rzp::Error::Io(tr!(
+                        msgs().block_size_range,
                         rzp::MAX_BLOCK_SIZE
                     )));
                 }
@@ -435,27 +393,27 @@ fn parse_opts(args: &[String]) -> Result<(Opts, Vec<String>)> {
             "-j" | "--threads" => {
                 i += 1;
                 if i >= args.len() {
-                    return Err(rzp::Error::Io("-j/--threads 需要一个线程数参数".into()));
+                    return Err(rzp::Error::Io(msgs().opt_j_requires_threads.into()));
                 }
                 let n: usize = args[i]
                     .parse()
-                    .map_err(|_| rzp::Error::Io(format!("无效的线程数: {}", args[i])))?;
+                    .map_err(|_| rzp::Error::Io(tr!(msgs().invalid_threads, args[i])))?;
                 if n == 0 {
-                    return Err(rzp::Error::Io("线程数必须 >= 1".into()));
+                    return Err(rzp::Error::Io(msgs().threads_at_least_one.into()));
                 }
                 threads = n;
             }
             "-D" => {
                 i += 1;
                 if i >= args.len() {
-                    return Err(rzp::Error::Io("-D 需要一个字典文件参数".into()));
+                    return Err(rzp::Error::Io(msgs().opt_d_requires_dict.into()));
                 }
                 dict = Some(PathBuf::from(&args[i]));
             }
             "-p" | "--password" => {
                 i += 1;
                 if i >= args.len() {
-                    return Err(rzp::Error::Io("-p/--password 需要一个密码参数".into()));
+                    return Err(rzp::Error::Io(msgs().opt_p_requires_password.into()));
                 }
                 password = Some(args[i].clone());
             }
@@ -463,7 +421,7 @@ fn parse_opts(args: &[String]) -> Result<(Opts, Vec<String>)> {
                 i += 1;
                 if i >= args.len() {
                     return Err(rzp::Error::Io(
-                        "--password-file 需要一个文件路径参数".into(),
+                        msgs().opt_password_file_requires_path.into(),
                     ));
                 }
                 password_file = Some(PathBuf::from(&args[i]));
@@ -472,28 +430,28 @@ fn parse_opts(args: &[String]) -> Result<(Opts, Vec<String>)> {
             "--include" => {
                 i += 1;
                 if i >= args.len() {
-                    return Err(rzp::Error::Io("--include 需要一个模式参数".into()));
+                    return Err(rzp::Error::Io(msgs().opt_include_requires_pattern.into()));
                 }
                 include.push(args[i].clone());
             }
             "--exclude" => {
                 i += 1;
                 if i >= args.len() {
-                    return Err(rzp::Error::Io("--exclude 需要一个模式参数".into()));
+                    return Err(rzp::Error::Io(msgs().opt_exclude_requires_pattern.into()));
                 }
                 exclude.push(args[i].clone());
             }
             "--argon2-memory" => {
                 i += 1;
                 if i >= args.len() {
-                    return Err(rzp::Error::Io("--argon2-memory 需要一个 KiB 参数".into()));
+                    return Err(rzp::Error::Io(msgs().opt_argon2_memory_requires_kib.into()));
                 }
                 let n: u32 = args[i].parse().map_err(|_| {
-                    rzp::Error::Io(format!("无效的 Argon2id 内存成本: {}", args[i]))
+                    rzp::Error::Io(tr!(msgs().invalid_argon2_memory, args[i]))
                 })?;
                 if n == 0 || n > rzp::ARGON2_MAX_MEMORY_KIB {
-                    return Err(rzp::Error::Io(format!(
-                        "Argon2id 内存成本必须在 1..={} KiB 之间",
+                    return Err(rzp::Error::Io(tr!(
+                        msgs().argon2_memory_range,
                         rzp::ARGON2_MAX_MEMORY_KIB
                     )));
                 }
@@ -502,14 +460,14 @@ fn parse_opts(args: &[String]) -> Result<(Opts, Vec<String>)> {
             "--argon2-iters" => {
                 i += 1;
                 if i >= args.len() {
-                    return Err(rzp::Error::Io("--argon2-iters 需要一个迭代次数参数".into()));
+                    return Err(rzp::Error::Io(msgs().opt_argon2_iters_requires_n.into()));
                 }
                 let n: u32 = args[i].parse().map_err(|_| {
-                    rzp::Error::Io(format!("无效的 Argon2id 迭代次数: {}", args[i]))
+                    rzp::Error::Io(tr!(msgs().invalid_argon2_iters, args[i]))
                 })?;
                 if n == 0 || n > rzp::ARGON2_MAX_ITERATIONS {
-                    return Err(rzp::Error::Io(format!(
-                        "Argon2id 迭代次数必须在 1..={} 之间",
+                    return Err(rzp::Error::Io(tr!(
+                        msgs().argon2_iters_range,
                         rzp::ARGON2_MAX_ITERATIONS
                     )));
                 }
@@ -518,14 +476,14 @@ fn parse_opts(args: &[String]) -> Result<(Opts, Vec<String>)> {
             "--argon2-lanes" => {
                 i += 1;
                 if i >= args.len() {
-                    return Err(rzp::Error::Io("--argon2-lanes 需要一个车道数参数".into()));
+                    return Err(rzp::Error::Io(msgs().opt_argon2_lanes_requires_n.into()));
                 }
                 let n: u32 = args[i]
                     .parse()
-                    .map_err(|_| rzp::Error::Io(format!("无效的 Argon2id 车道数: {}", args[i])))?;
+                    .map_err(|_| rzp::Error::Io(tr!(msgs().invalid_argon2_lanes, args[i])))?;
                 if n == 0 || n > rzp::ARGON2_MAX_LANES {
-                    return Err(rzp::Error::Io(format!(
-                        "Argon2id 车道数必须在 1..={} 之间",
+                    return Err(rzp::Error::Io(tr!(
+                        msgs().argon2_lanes_range,
                         rzp::ARGON2_MAX_LANES
                     )));
                 }
@@ -537,7 +495,7 @@ fn parse_opts(args: &[String]) -> Result<(Opts, Vec<String>)> {
             "--strong-checksum" => strong_checksum = true,
             "-" => positional.push("-".to_string()),
             s if s.starts_with('-') => {
-                return Err(rzp::Error::Io(format!("未知选项: {s}")));
+                return Err(rzp::Error::Io(tr!(msgs().unknown_option, s)));
             }
             s => positional.push(s.to_string()),
         }
@@ -571,10 +529,10 @@ fn parse_opts(args: &[String]) -> Result<(Opts, Vec<String>)> {
 /// 校验位置参数：必须有输入，且 stdin（`-`）不能与多个输入混用。
 fn validate_inputs(positional: &[String]) -> Result<Vec<PathBuf>> {
     if positional.is_empty() {
-        return Err(rzp::Error::Io("缺少输入文件".into()));
+        return Err(rzp::Error::Io(msgs().missing_input.into()));
     }
     if positional.len() > 1 && positional.iter().any(|s| s == "-") {
-        return Err(rzp::Error::Io("stdin（-）不能与多个输入一起使用".into()));
+        return Err(rzp::Error::Io(msgs().stdin_multi_input.into()));
     }
     Ok(positional.iter().map(PathBuf::from).collect())
 }
@@ -582,7 +540,7 @@ fn validate_inputs(positional: &[String]) -> Result<Vec<PathBuf>> {
 /// `-o` 只能用于单个输入。
 fn ensure_single_output(opts: &Opts, inputs: &[PathBuf]) -> Result<()> {
     if opts.output.is_some() && inputs.len() > 1 {
-        return Err(rzp::Error::Io("-o 只能用于单个输入".into()));
+        return Err(rzp::Error::Io(msgs().output_single_input.into()));
     }
     Ok(())
 }
@@ -625,16 +583,16 @@ fn add_suffix(input: &Path, suffix: &str) -> PathBuf {
 /// 递归收集目录下的所有文件（不跟随符号链接，结果按路径排序）。
 fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     let entries = std::fs::read_dir(dir)
-        .map_err(|e| rzp::Error::Io(format!("无法读取目录 {}: {e}", dir.display())))?;
+        .map_err(|e| rzp::Error::Io(tr!(msgs().cannot_read_dir, dir.display(), e)))?;
     let mut paths: Vec<PathBuf> = Vec::new();
     for entry in entries {
-        let entry = entry.map_err(|e| rzp::Error::Io(format!("读取目录项失败: {e}")))?;
+        let entry = entry.map_err(|e| rzp::Error::Io(tr!(msgs().read_dir_entry_failed, e)))?;
         paths.push(entry.path());
     }
     paths.sort();
     for path in paths {
         let meta = std::fs::symlink_metadata(&path)
-            .map_err(|e| rzp::Error::Io(format!("无法读取元数据 {}: {e}", path.display())))?;
+            .map_err(|e| rzp::Error::Io(tr!(msgs().cannot_read_metadata, path.display(), e)))?;
         if meta.is_dir() {
             collect_files(&path, out)?;
         } else if meta.is_file() {
@@ -939,10 +897,11 @@ fn compress_one(
             100.0 * out_len as f64 / input_len as f64
         };
         eprintln!(
-            "{}: {} -> {} ({input_len} -> {out_len} 字节, {ratio:.1}%)",
-            style::paint("压缩完成", style::Color::Green, style::stderr_tty()),
+            "{}: {} -> {} ({input_len} -> {out_len} {}, {ratio:.1}%)",
+            style::paint(msgs().status_compressed, style::Color::Green, style::stderr_tty()),
             label(input, true),
-            label(output, false)
+            label(output, false),
+            msgs().bytes
         );
         return Ok(());
     }
@@ -983,10 +942,11 @@ fn compress_one(
         100.0 * out_len as f64 / input_len as f64
     };
     eprintln!(
-        "{}: {} -> {} ({input_len} -> {out_len} 字节, {ratio:.1}%)",
-        style::paint("压缩完成", style::Color::Green, style::stderr_tty()),
+        "{}: {} -> {} ({input_len} -> {out_len} {}, {ratio:.1}%)",
+        style::paint(msgs().status_compressed, style::Color::Green, style::stderr_tty()),
         label(input, true),
-        label(output, false)
+        label(output, false),
+        msgs().bytes
     );
     Ok(())
 }
@@ -1010,10 +970,11 @@ fn decompress_one(
         rzp::archive::extract_indexed(&mut r, output, dict, threads)?;
         maybe_remove_input(input, output, keep);
         eprintln!(
-            "{}: {} -> {}（目录归档）",
-            style::paint("解压完成", style::Color::Green, style::stderr_tty()),
+            "{}: {} -> {} {}",
+            style::paint(msgs().status_decompressed, style::Color::Green, style::stderr_tty()),
             label(input, true),
-            label(output, false)
+            label(output, false),
+            msgs().dir_archive
         );
         return Ok(());
     }
@@ -1027,10 +988,11 @@ fn decompress_one(
         rzp::archive::extract(&mut decoder, output)?;
         maybe_remove_input(input, output, keep);
         eprintln!(
-            "{}: {} -> {}（目录归档）",
-            style::paint("解压完成", style::Color::Green, style::stderr_tty()),
+            "{}: {} -> {} {}",
+            style::paint(msgs().status_decompressed, style::Color::Green, style::stderr_tty()),
             label(input, true),
-            label(output, false)
+            label(output, false),
+            msgs().dir_archive
         );
         return Ok(());
     }
@@ -1054,11 +1016,12 @@ fn decompress_one(
     maybe_remove_input(input, output, keep);
 
     eprintln!(
-        "{}: {} -> {} ({} 字节)",
-        style::paint("解压完成", style::Color::Green, style::stderr_tty()),
+        "{}: {} -> {} ({} {})",
+        style::paint(msgs().status_decompressed, style::Color::Green, style::stderr_tty()),
         label(input, true),
         label(output, false),
-        decoder.total_out()
+        decoder.total_out(),
+        msgs().bytes
     );
     Ok(())
 }
@@ -1072,38 +1035,42 @@ fn print_info(input: &Path, info: &rzp::Info) {
     };
     eprintln!(
         "{}: {}",
-        style::paint("文件", style::Color::Cyan, style::stderr_tty()),
+        style::paint(msgs().file, style::Color::Cyan, style::stderr_tty()),
         label(input, true)
     );
     eprintln!(
         "{}: {}",
-        style::paint("压缩级别", style::Color::Cyan, style::stderr_tty()),
+        style::paint(msgs().level, style::Color::Cyan, style::stderr_tty()),
         info.level.as_u8()
     );
     eprintln!(
-        "{}: {} 字节",
-        style::paint("原始大小", style::Color::Cyan, style::stderr_tty()),
-        info.raw_size
+        "{}: {} {}",
+        style::paint(msgs().raw_size, style::Color::Cyan, style::stderr_tty()),
+        info.raw_size,
+        msgs().bytes
     );
     eprintln!(
-        "{}: {} 字节",
-        style::paint("压缩大小", style::Color::Cyan, style::stderr_tty()),
-        info.compressed_size
+        "{}: {} {}",
+        style::paint(msgs().compressed_size, style::Color::Cyan, style::stderr_tty()),
+        info.compressed_size,
+        msgs().bytes
     );
     eprintln!(
         "{}: {ratio:.1}%",
-        style::paint("压缩率", style::Color::Cyan, style::stderr_tty())
+        style::paint(msgs().ratio, style::Color::Cyan, style::stderr_tty())
     );
     eprintln!(
         "{}: {}",
-        style::paint("预设字典", style::Color::Cyan, style::stderr_tty()),
-        if info.has_dictionary { "是" } else { "否" }
+        style::paint(msgs().dictionary, style::Color::Cyan, style::stderr_tty()),
+        if info.has_dictionary { msgs().yes } else { msgs().no }
     );
     eprintln!(
-        "{}: {} (压缩 {}, 存储 {})",
-        style::paint("块数", style::Color::Cyan, style::stderr_tty()),
+        "{}: {} ({} {}, {} {})",
+        style::paint(msgs().blocks, style::Color::Cyan, style::stderr_tty()),
         info.block_count,
+        msgs().compressed_word,
         info.compressed_blocks,
+        msgs().stored_word,
         info.stored_blocks
     );
 }
@@ -1125,44 +1092,46 @@ fn info_one(input: &Path, password: Option<&str>) -> Result<()> {
         };
         eprintln!(
             "{}: {}",
-            style::paint("文件", style::Color::Cyan, style::stderr_tty()),
+            style::paint(msgs().file, style::Color::Cyan, style::stderr_tty()),
             label(input, true)
         );
         eprintln!(
-            "{}: 索引目录归档（RZPA）",
-            style::paint("类型", style::Color::Cyan, style::stderr_tty())
+            "{}: {}",
+            style::paint(msgs().type_label, style::Color::Cyan, style::stderr_tty()),
+            msgs().indexed_dir_archive
         );
         eprintln!(
             "{}: {}",
-            style::paint("条目数", style::Color::Cyan, style::stderr_tty()),
+            style::paint(msgs().entry_count, style::Color::Cyan, style::stderr_tty()),
             entries.len()
         );
         eprintln!(
-            "{}: {} 文件 / {} 目录 / {} 符号链接",
-            style::paint("构成", style::Color::Cyan, style::stderr_tty()),
-            files,
-            dirs,
-            links
+            "{}: {}",
+            style::paint(msgs().composition, style::Color::Cyan, style::stderr_tty()),
+            tr!(msgs().composition_files, files, dirs, links)
         );
         eprintln!(
-            "{}: {} 字节",
-            style::paint("原始大小", style::Color::Cyan, style::stderr_tty()),
-            total_raw
+            "{}: {} {}",
+            style::paint(msgs().raw_size, style::Color::Cyan, style::stderr_tty()),
+            total_raw,
+            msgs().bytes
         );
         eprintln!(
-            "{}: {} 字节",
-            style::paint("条目数据大小", style::Color::Cyan, style::stderr_tty()),
-            total_comp
+            "{}: {} {}",
+            style::paint(msgs().entry_data_size, style::Color::Cyan, style::stderr_tty()),
+            total_comp,
+            msgs().bytes
         );
         eprintln!(
-            "{}: {} 字节 ({ratio:.1}%)",
-            style::paint("归档大小", style::Color::Cyan, style::stderr_tty()),
-            out_len
+            "{}: {} {} ({ratio:.1}%)",
+            style::paint(msgs().archive_size, style::Color::Cyan, style::stderr_tty()),
+            out_len,
+            msgs().bytes
         );
         eprintln!(
             "{}: {}",
-            style::paint("加密", style::Color::Cyan, style::stderr_tty()),
-            if password.is_some() { "是" } else { "否" }
+            style::paint(msgs().encrypted, style::Color::Cyan, style::stderr_tty()),
+            if password.is_some() { msgs().yes } else { msgs().no }
         );
         return Ok(());
     }
@@ -1172,14 +1141,15 @@ fn info_one(input: &Path, password: Option<&str>) -> Result<()> {
     let encrypted = password.is_some();
     eprintln!(
         "{}: {}",
-        style::paint("加密", style::Color::Cyan, style::stderr_tty()),
-        if encrypted { "是" } else { "否" }
+        style::paint(msgs().encrypted, style::Color::Cyan, style::stderr_tty()),
+        if encrypted { msgs().yes } else { msgs().no }
     );
     if encrypted {
         eprintln!(
-            "{}: {} 字节",
-            style::paint("外层归档大小", style::Color::Cyan, style::stderr_tty()),
-            file_len(input)
+            "{}: {} {}",
+            style::paint(msgs().outer_archive_size, style::Color::Cyan, style::stderr_tty()),
+            file_len(input),
+            msgs().bytes
         );
     }
     Ok(())
@@ -1190,9 +1160,10 @@ fn test_one(input: &Path, dict: &[u8], threads: usize, password: Option<&str>) -
     if kind == Kind::IndexedDir {
         rzp::archive::verify_indexed(&mut reader, dict, threads)?;
         eprintln!(
-            "{}: {}（索引目录归档）",
-            style::paint("校验通过", style::Color::Green, style::stderr_tty()),
-            label(input, true)
+            "{}: {} {}",
+            style::paint(msgs().verified, style::Color::Green, style::stderr_tty()),
+            label(input, true),
+            msgs().indexed_dir_archive_short
         );
         return Ok(());
     }
@@ -1206,11 +1177,10 @@ fn test_one(input: &Path, dict: &[u8], threads: usize, password: Option<&str>) -
         }
     }
     eprintln!(
-        "{}: {} (级别 {}, 共 {} 字节)",
-        style::paint("校验通过", style::Color::Green, style::stderr_tty()),
+        "{}: {} {}",
+        style::paint(msgs().verified, style::Color::Green, style::stderr_tty()),
         label(input, true),
-        decoder.level().as_u8(),
-        decoder.total_out()
+        tr!(msgs().verified_detail, decoder.level().as_u8(), decoder.total_out())
     );
     Ok(())
 }
@@ -1219,7 +1189,7 @@ fn list_one(input: &Path, dict: &[u8], threads: usize, password: Option<&str>) -
     let (mut reader, kind) = open_payload(input, password)?;
     eprintln!(
         "{}: {}",
-        style::paint("归档", style::Color::Cyan, style::stderr_tty()),
+        style::paint(msgs().archive, style::Color::Cyan, style::stderr_tty()),
         label(input, true)
     );
 
@@ -1238,8 +1208,8 @@ fn list_one(input: &Path, dict: &[u8], threads: usize, password: Option<&str>) -
 
     let mut decoder = Decoder::with_dictionary(reader, dict).with_threads(threads);
     if !decoder.is_directory_archive()? {
-        return Err(rzp::Error::Io(format!(
-            "{} 不是目录归档",
+        return Err(rzp::Error::Io(tr!(
+            msgs().not_dir_archive,
             label(input, true)
         )));
     }
@@ -1382,11 +1352,11 @@ fn compress_dir(
 
         maybe_remove_input_dir(dir, output, keep);
         eprintln!(
-            "{}: {} -> {}（目录归档, {} 字节）",
-            style::paint("压缩完成", style::Color::Green, style::stderr_tty()),
+            "{}: {} -> {} {}",
+            style::paint(msgs().status_compressed, style::Color::Green, style::stderr_tty()),
             label(dir, true),
             label(output, false),
-            out_len
+            tr!(msgs().dir_archive_bytes, out_len)
         );
         return Ok(());
     }
@@ -1411,11 +1381,11 @@ fn compress_dir(
     maybe_remove_input_dir(dir, output, keep);
 
     eprintln!(
-        "{}: {} -> {}（目录归档, {} 字节）",
-        style::paint("压缩完成", style::Color::Green, style::stderr_tty()),
+        "{}: {} -> {} {}",
+        style::paint(msgs().status_compressed, style::Color::Green, style::stderr_tty()),
         label(dir, true),
         label(output, false),
-        out_len
+        tr!(msgs().dir_archive_bytes, out_len)
     );
     Ok(())
 }
@@ -1523,9 +1493,7 @@ fn cmd_test(args: &[String]) -> Result<()> {
 fn cmd_extract(args: &[String]) -> Result<()> {
     let (opts, positional) = parse_opts(args)?;
     if positional.len() != 2 {
-        return Err(rzp::Error::Io(
-            "rzp x 需要两个参数：归档文件 与 条目路径".into(),
-        ));
+        return Err(rzp::Error::Io(msgs().extract_usage.into()));
     }
     let archive = PathBuf::from(&positional[0]);
     let entry = PathBuf::from(&positional[1]);
@@ -1548,14 +1516,12 @@ fn extract_one(
 ) -> Result<()> {
     let (mut reader, kind) = open_payload(archive, password)?;
     if kind != Kind::IndexedDir {
-        return Err(rzp::Error::Io(
-            "按条目抽取需要索引式目录归档（旧式 solid 归档请先整体解压）".into(),
-        ));
+        return Err(rzp::Error::Io(msgs().extract_requires_indexed.into()));
     }
     rzp::archive::extract_indexed_path(&mut reader, out_dir, entry, dict, threads)?;
     eprintln!(
         "{}: {} -> {}",
-        style::paint("已抽取", style::Color::Green, style::stderr_tty()),
+        style::paint(msgs().extracted, style::Color::Green, style::stderr_tty()),
         entry.display(),
         out_dir.join(entry).display()
     );
@@ -1566,126 +1532,22 @@ fn extract_one(
 // `rzp completion`：输出 shell 补全脚本（bash/zsh/fish），零依赖静态生成。
 // ---------------------------------------------------------------------------
 
-const BASH_COMPLETION: &str = r##"# rzp 补全（bash）
-_rzp_complete() {
-    local cur prev sub i
-    COMPREPLY=()
-    cur="${COMP_WORDS[COMP_CWORD]}"
-    prev="${COMP_WORDS[COMP_CWORD-1]}"
-
-    local subcmds="c d i l t x bench completion"
-    local opts="-o -l -b -j -D -p --password --password-file --ask-pass --argon2-memory --argon2-iters --argon2-lanes --strong-checksum --include --exclude -f --force -k --keep --progress"
-
-    sub=""
-    for ((i = 1; i < COMP_CWORD; i++)); do
-        case "${COMP_WORDS[i]}" in
-            c|d|i|l|t|x|bench|completion) sub="${COMP_WORDS[i]}" ;;
-        esac
-    done
-
-    if [[ -z "$sub" ]]; then
-        COMPREPLY=( $(compgen -W "$subcmds" -- "$cur") )
-        return 0
-    fi
-
-    case "$prev" in
-        -o|-D|--password-file) COMPREPLY=( $(compgen -f -- "$cur") ); return 0 ;;
-        -l) COMPREPLY=( $(compgen -W "0 1 2 3 4 5 6 7 8 9" -- "$cur") ); return 0 ;;
-    esac
-
-    if [[ "$cur" == -* ]]; then
-        COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
-    else
-        COMPREPLY=( $(compgen -f -- "$cur") )
-    fi
-}
-complete -F _rzp_complete rzp
-"##;
-
-const ZSH_COMPLETION: &str = r##"#compdef rzp
-_rzp() {
-    local -a subcmds
-    subcmds=(c d i l t x bench completion)
-    if (( CURRENT == 2 )); then
-        _describe 'command' subcmds
-        return
-    fi
-    _arguments \
-        '-o[输出文件]:文件:_files' \
-        '-l[压缩级别 0-9]:级别:(0 1 2 3 4 5 6 7 8 9)' \
-        '--block-size[目标块大小]:字节数:' \
-        '-j[工作线程数]:线程数:' \
-        '-D[预设字典文件]:字典:_files' \
-        '--password[密码]:密码:' \
-        '--password-file[从文件读取密码]:密码文件:_files' \
-        '--ask-pass[交互式输入密码]' \
-        '--argon2-memory[Argon2id 内存成本(KiB)]:KiB:' \
-        '--argon2-iters[Argon2id 迭代次数]:次数:' \
-        '--argon2-lanes[Argon2id 并行度]:车道数:' \
-        '--strong-checksum[使用 BLAKE2b-256 强校验]' \
-        '--include[包含通配模式]:模式:' \
-        '--exclude[排除通配模式]:模式:' \
-        '--force[覆盖已存在文件]' \
-        '--keep[保留输入文件]' \
-        '--progress[显示进度条]' \
-        '*:文件:_files'
-}
-_rzp "$@"
-"##;
-
-const FISH_COMPLETION: &str = r##"# rzp 补全（fish）
-complete -c rzp -f
-
-complete -c rzp -n '__fish_use_subcommand' -a c -d '压缩'
-complete -c rzp -n '__fish_use_subcommand' -a d -d '解压'
-complete -c rzp -n '__fish_use_subcommand' -a i -d '查看归档信息'
-complete -c rzp -n '__fish_use_subcommand' -a l -d '列出目录归档内容'
-complete -c rzp -n '__fish_use_subcommand' -a t -d '校验完整性'
-complete -c rzp -n '__fish_use_subcommand' -a x -d '随机抽取单个条目'
-complete -c rzp -n '__fish_use_subcommand' -a bench -d '基准对比'
-complete -c rzp -n '__fish_use_subcommand' -a completion -d '输出补全脚本'
-
-complete -c rzp -s o -r -d '指定输出文件'
-complete -c rzp -s l -r -a '0 1 2 3 4 5 6 7 8 9' -d '压缩级别'
-complete -c rzp -s b -r -d '目标块大小（字节）'
-complete -c rzp -s j -r -d '工作线程数'
-complete -c rzp -s D -r -d '预设字典文件'
-complete -c rzp -s p -r -d '密码'
-complete -c rzp -l password -r -d '密码'
-complete -c rzp -l password-file -r -d '从文件读取密码'
-complete -c rzp -l ask-pass -d '交互式输入密码'
-complete -c rzp -l argon2-memory -r -d 'Argon2id 内存成本(KiB)'
-complete -c rzp -l argon2-iters -r -d 'Argon2id 迭代次数'
-complete -c rzp -l argon2-lanes -r -d 'Argon2id 并行度'
-complete -c rzp -l strong-checksum -d '使用 BLAKE2b-256 强校验'
-complete -c rzp -l include -r -d '包含通配模式'
-complete -c rzp -l exclude -r -d '排除通配模式'
-complete -c rzp -s f -l force -d '覆盖已存在文件'
-complete -c rzp -s k -l keep -d '保留输入文件'
-complete -c rzp -l progress -d '显示进度条'
-"##;
-
 fn cmd_completion(args: &[String]) -> Result<()> {
-    const SHELLS: [(&str, &str); 3] = [
-        ("bash", BASH_COMPLETION),
-        ("zsh", ZSH_COMPLETION),
-        ("fish", FISH_COMPLETION),
+    let shells: [(&str, &str); 3] = [
+        ("bash", msgs().bash_completion),
+        ("zsh", msgs().zsh_completion),
+        ("fish", msgs().fish_completion),
     ];
     if args.is_empty() {
-        return Err(rzp::Error::Io(
-            "用法: rzp completion <shell>（支持: bash zsh fish）".into(),
-        ));
+        return Err(rzp::Error::Io(msgs().completion_usage.into()));
     }
-    for (name, script) in SHELLS {
+    for (name, script) in shells {
         if args[0] == name {
             print!("{script}");
             return Ok(());
         }
     }
-    Err(rzp::Error::Io(format!(
-        "未知 shell: {}（支持: bash zsh fish）",
-        args[0]
-    )))
+    Err(rzp::Error::Io(tr!(msgs().unknown_shell, args[0])))
 }
 
 // ---------------------------------------------------------------------------
@@ -1716,20 +1578,18 @@ struct BenchRow {
 fn cmd_bench(args: &[String]) -> Result<()> {
     let (opts, positional) = parse_opts(args)?;
     if positional.is_empty() {
-        return Err(rzp::Error::Io(
-            "rzp bench 需要至少一个输入文件或目录".into(),
-        ));
+        return Err(rzp::Error::Io(msgs().bench_no_input.into()));
     }
     let files = collect_bench_inputs(&positional)?;
     if files.is_empty() {
-        return Err(rzp::Error::Io("未找到可基准测试的文件".into()));
+        return Err(rzp::Error::Io(msgs().bench_no_files.into()));
     }
 
     let level = opts.level;
     let mut rows: Vec<BenchRow> = Vec::new();
     for file in &files {
         let data = std::fs::read(file)
-            .map_err(|e| rzp::Error::Io(format!("无法读取 {}: {e}", file.display())))?;
+            .map_err(|e| rzp::Error::Io(tr!(msgs().cannot_read_file, file.display(), e)))?;
         let orig = data.len() as u64;
         let rzp = bench_rzp(&data, level);
         let gzip = bench_external("gzip", &["-c", "-6"], &["-d", "-c"], &data);
@@ -1769,13 +1629,13 @@ fn collect_bench_inputs(paths: &[String]) -> Result<Vec<PathBuf>> {
     for s in paths {
         let p = Path::new(s);
         let meta = std::fs::metadata(p)
-            .map_err(|e| rzp::Error::Io(format!("无法访问 {}: {e}", p.display())))?;
+            .map_err(|e| rzp::Error::Io(tr!(msgs().cannot_access, p.display(), e)))?;
         if meta.is_file() {
             out.push(p.to_path_buf());
         } else if meta.is_dir() {
             walk(p, &mut out)?;
         } else {
-            return Err(rzp::Error::Io(format!("不是文件或目录: {}", p.display())));
+            return Err(rzp::Error::Io(tr!(msgs().not_file_or_dir, p.display())));
         }
     }
     Ok(out)
@@ -1838,12 +1698,12 @@ fn run_pipe(program: &str, args: &[&str], input: &[u8]) -> Result<Vec<u8>> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|e| rzp::Error::Io(format!("无法启动 {program}: {e}")))?;
+        .map_err(|e| rzp::Error::Io(tr!(msgs().cannot_start_program, program, e)))?;
 
     let mut stdin = child
         .stdin
         .take()
-        .ok_or_else(|| rzp::Error::Io("无法获取子进程 stdin".into()))?;
+        .ok_or_else(|| rzp::Error::Io(msgs().cannot_get_stdin.into()))?;
     let data = input.to_vec();
     let writer = std::thread::spawn(move || {
         let _ = stdin.write_all(&data);
@@ -1852,7 +1712,7 @@ fn run_pipe(program: &str, args: &[&str], input: &[u8]) -> Result<Vec<u8>> {
     let output = child.wait_with_output()?;
     writer.join().ok();
     if !output.status.success() {
-        return Err(rzp::Error::Io(format!("{program} 退出码非零")));
+        return Err(rzp::Error::Io(tr!(msgs().program_nonzero_exit, program)));
     }
     Ok(output.stdout)
 }
@@ -1863,7 +1723,7 @@ fn print_bench(rows: &[BenchRow]) {
     println!(
         "{}",
         style::paint(
-            "RZP 基准对比（压缩率越低越好，时间越短越好）",
+            msgs().bench_title,
             style::Color::Bold,
             tty
         )
@@ -1872,7 +1732,13 @@ fn print_bench(rows: &[BenchRow]) {
 
     let header = format!(
         "{:<32} {:>12} {:>12} {:>10} {:>12} {:>12} {:>6}",
-        "文件", "原始", "压缩大小", "压缩比", "压缩耗时", "解压耗时", "校验"
+        msgs().bench_header_file,
+        msgs().bench_header_orig,
+        msgs().bench_header_comp_size,
+        msgs().bench_header_ratio,
+        msgs().bench_header_comp_time,
+        msgs().bench_header_decomp_time,
+        msgs().bench_header_verify
     );
     println!("{header}");
 
@@ -1900,23 +1766,26 @@ fn print_bench(rows: &[BenchRow]) {
         }
     }
     if totals.0 > 0 {
-        println!("{}", style::paint("汇总", style::Color::Bold, tty));
+        println!("{}", style::paint(msgs().bench_summary, style::Color::Bold, tty));
         println!(
-            "原始: {}    rzp: {} ({})    gzip: {} ({})    zstd: {} ({})",
-            human_size(totals.0),
-            human_size(totals.1),
-            pct(totals.1, totals.0),
-            human_size(totals.2),
-            pct(totals.2, totals.0),
-            human_size(totals.3),
-            pct(totals.3, totals.0),
+            "{}",
+            tr!(
+                msgs().bench_summary_fmt,
+                human_size(totals.0),
+                human_size(totals.1),
+                pct(totals.1, totals.0),
+                human_size(totals.2),
+                pct(totals.2, totals.0),
+                human_size(totals.3),
+                pct(totals.3, totals.0)
+            )
         );
     }
 }
 
 fn print_tool(name: &str, t: &BenchTool, orig: u64, tty: bool) {
     if !t.available {
-        println!("{:<8} {:>12}", name, "n/a（未安装）");
+        println!("{:<8} {:>12}", name, msgs().bench_na);
         return;
     }
     let ok = if t.decomp_ok {
@@ -1971,7 +1840,8 @@ fn dur(secs: f64) -> String {
 
 /// 读取预设字典文件（整个文件内容，交由库内部截断到有效窗口）。
 fn read_dict(path: &Path) -> Result<Vec<u8>> {
-    std::fs::read(path).map_err(|e| rzp::Error::Io(format!("无法读取字典 {}: {e}", path.display())))
+    std::fs::read(path)
+        .map_err(|e| rzp::Error::Io(tr!(msgs().cannot_read_dict, path.display(), e)))
 }
 fn open_input(path: &Path) -> Result<Box<dyn Read>> {
     if path == Path::new("-") {
@@ -1990,8 +1860,8 @@ fn create_output_writer(path: &Path, force: bool) -> Result<Box<dyn Write>> {
         Ok(Box::new(BufWriter::new(std::io::stdout())))
     } else {
         if path.exists() && !force {
-            return Err(rzp::Error::Io(format!(
-                "输出文件已存在: {}（使用 -f 覆盖）",
+            return Err(rzp::Error::Io(tr!(
+                msgs().output_exists,
                 path.display()
             )));
         }
@@ -2095,7 +1965,7 @@ fn peek_kind<R: Read + Seek>(r: &mut R) -> Result<Kind> {
         }
         return Ok(Kind::FileStream);
     }
-    Err(rzp::Error::Corrupt("未知或损坏的 RZP 数据".into()))
+    Err(rzp::Error::Corrupt(msgs().corrupt_data.into()))
 }
 
 /// 打开输入并（必要时）解密，返回可随机访问读取器与负载类型。
@@ -2138,7 +2008,7 @@ fn encrypt_inner_to_output(
     force: bool,
 ) -> Result<u64> {
     let total = std::fs::metadata(inner_path)
-        .map_err(|e| rzp::Error::Io(format!("无法读取临时文件 {}: {e}", inner_path.display())))?
+        .map_err(|e| rzp::Error::Io(tr!(msgs().cannot_read_temp, inner_path.display(), e)))?
         .len();
 
     let reader = BufReader::with_capacity(64 * 1024, File::open(inner_path)?);
@@ -2181,7 +2051,7 @@ fn maybe_remove_input(input: &Path, output: &Path, keep: bool) {
         return;
     }
     if let Err(e) = std::fs::remove_file(input) {
-        eprintln!("警告: 无法删除输入文件 {}: {e}", input.display());
+        eprintln!("{}", tr!(msgs().warn_cannot_remove_input, input.display(), e));
     }
 }
 
@@ -2192,24 +2062,24 @@ fn maybe_remove_input_dir(input: &Path, output: &Path, keep: bool) {
     }
     if output.starts_with(input) {
         eprintln!(
-            "警告: 输出归档位于输入目录内，未删除输入目录 {}",
-            input.display()
+            "{}",
+            tr!(msgs().warn_output_inside_input, input.display())
         );
         return;
     }
     if let Err(e) = std::fs::remove_dir_all(input) {
-        eprintln!("警告: 无法删除输入目录 {}: {e}", input.display());
+        eprintln!("{}", tr!(msgs().warn_cannot_remove_dir, input.display(), e));
     }
 }
 
 /// 校验目录归档的输出目标：不能是 stdout，且已存在时需 `-f` 覆盖。
 fn ensure_dir_output(output: &Path, force: bool) -> Result<()> {
     if output == Path::new("-") {
-        return Err(rzp::Error::Io("目录归档无法解压到 stdout".into()));
+        return Err(rzp::Error::Io(msgs().dir_archive_no_stdout.into()));
     }
     if output.exists() && !force {
-        return Err(rzp::Error::Io(format!(
-            "输出已存在: {}（使用 -f 覆盖）",
+        return Err(rzp::Error::Io(tr!(
+            msgs().output_exists_force,
             output.display()
         )));
     }

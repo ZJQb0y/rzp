@@ -1,6 +1,7 @@
 [package]
 name = "rzp"
-version = "1.6.0"
+version = "1.7.0"
+repository = "https://github.com/ZJQb0y/rzp"
 edition = "2021"
 description = "RZP — a from-scratch, streaming, integrity-checked compression format"
 authors = ["张俊琦 <mokaifurry@outlook.com>"]
@@ -13,6 +14,7 @@ exclude = [
     "dist/",
     "target/",
     "package.sh",
+    "package.ps1",
 ]
 
 [lib]
@@ -37,3 +39,13 @@ copyright = "2026 张俊琦 <mokaifurry@outlook.com>"
 license-file = "LICENSE"
 section = "utils"
 priority = "optional"
+# shared-mime-info 提供 update-mime-database 与 /usr/share/mime/packages 的 dpkg 触发器，
+# 安装/卸载时自动重建 MIME 数据库，使 .rzp 文件能显示对应图标。
+depends = ["$auto", "shared-mime-info"]
+assets = [
+    "$auto",
+    ["packaging/mime/rzp.xml", "usr/share/mime/packages/rzp.xml", "644"],
+    ["assets/rzp.svg", "usr/share/icons/hicolor/scalable/mimetypes/application-x-rzp.svg", "644"],
+    ["assets/rzp.png", "usr/share/icons/hicolor/512x512/mimetypes/application-x-rzp.png", "644"],
+]
+maintainer-scripts = "packaging/debian"

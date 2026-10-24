@@ -18,8 +18,12 @@
 
 ```bash
 git clone <repo>
-cd RZP_linux_1.6.0
+cd RZP_1.6.1
 cargo build --release          # 产物在 target/release/rzp
+
+# 交叉编译 Windows 版本（需先安装对应目标与 mingw-w64 链接器）
+rustup target add x86_64-pc-windows-gnu
+cargo build --release --target x86_64-pc-windows-gnu   # 产物在 target/x86_64-pc-windows-gnu/release/rzp.exe
 ```
 
 ### 通过 Cargo 安装
@@ -30,12 +34,29 @@ cargo install rzp
 
 ### 一键打包
 
+Linux（可同时产出 Linux 与 Windows 产物）：
+
 ```bash
 ./package.sh
 ```
 
-生成可移植 `dist/rzp-<版本>-<架构>.tar.gz`（含二进制 + 文档 + 补全脚本 + man page），
+生成 Linux 可移植 `dist/rzp-<版本>-<架构>.tar.gz`（含二进制 + 文档 + 补全脚本 + man page），
 若装有 `cargo-deb` 还会生成 Debian 安装包 `.deb`。
+
+若已安装 `x86_64-pc-windows-gnu` 目标与 mingw-w64 链接器，还会额外生成
+Windows 可移植 `dist/rzp-<版本>-x86_64-windows.zip`（含 `rzp.exe` + 文档 + 图标）；
+若装有 NSIS（`makensis`），还会生成 Windows 安装包
+`dist/rzp-<版本>-x86_64-windows-setup.exe`。
+
+Windows（原生编译打包，需 PowerShell）：
+
+```powershell
+.\package.ps1            # 生成 Windows zip + NSIS 安装包
+.\package.ps1 -SkipInstaller   # 仅生成 zip
+```
+
+`rzp.exe` 的图标与文件版本信息由 [build.rs](build.rs) 在编译时嵌入（MSVC 用
+`rc.exe`，mingw 交叉编译用 `windres`）。
 
 ---
 

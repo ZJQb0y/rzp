@@ -1,14 +1,33 @@
-//! 加密随机源：Unix 上读取 `/dev/urandom`，失败返回错误。
+//! 加密随机源：Unix 上读取 `/dev/urandom`，Windows 上调用 `RtlGenRandom`。
 //!
 //! 用于生成盐（16 字节）与 nonce（12 字节）。
 
-use std::fs::File;
-use std::io::Read;
+use std::io;
 
 /// 用系统随机源填充缓冲区。
-pub fn fill_bytes(buf: &mut [u8]) -> std::io::Result<()> {
+#[cfg(unix)]
+pub fn fill_bytes(buf: &mut [u8]) -> io::Result<()> {
+    use std::fs::File;
+    use std::io::Read;
     let mut f = File::open("/dev/urandom")?;
     f.read_exact(buf)
+}
+
+/// Windows：通过 `advapi32` 的 `RtlGenRandom`（导出名 `SystemFunction036`）填充。
+#[cfg(windows)]
+pub fn fill_bytes(buf: &mut [u8]) -> io::Result<()> {
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn SystemFunction036(buf: *mut u8, len: u32) -> u8;
+    }
+    let ok = unsafe { SystemFunction036(buf.as_mut_ptr(), buf.len() as u32) };
+    if ok == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "RtlGenRandom failed",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

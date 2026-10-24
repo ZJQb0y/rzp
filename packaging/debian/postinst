@@ -1,0 +1,9 @@
+#!/bin/sh
+set -e
+
+# 安装/升级后刷新 MIME 数据库，使 .rzp -> application/x-rzp 映射立即生效。
+if command -v update-mime-database >/dev/null 2>&1; then
+    update-mime-database /usr/share/mime
+fi
+
+exit 0
