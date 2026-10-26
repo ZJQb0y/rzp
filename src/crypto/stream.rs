@@ -13,8 +13,8 @@ use super::rand;
 use super::{chunk_aad, chunk_nonce, ct_eq, derive_key, validate_params};
 use crate::error::{Error, Result};
 use crate::format::{
-    AEAD_CHACHA20_POLY1305, AEAD_CHUNK_SIZE, ENC_HEADER_SIZE, FLAG_ENCRYPTED, KDF_ARGON2ID, MAGIC,
-    NONCE_LEN, SALT_LEN, TAG_LEN, VERSION,
+    AEAD_CHACHA20_POLY1305, AEAD_CHUNK_SIZE, ENC_HEADER_SIZE, ENVELOPE_VERSION, FLAG_ENCRYPTED,
+    KDF_ARGON2ID, MAGIC, NONCE_LEN, SALT_LEN, TAG_LEN,
 };
 
 /// 把内部错误转为 `io::Error`（供 `Read`/`Write` trait 使用）。
@@ -77,7 +77,7 @@ impl<W: Write> Encryptor<W> {
 
         let mut header = [0u8; ENC_HEADER_SIZE];
         header[0..3].copy_from_slice(&MAGIC);
-        header[3] = VERSION;
+        header[3] = ENVELOPE_VERSION;
         header[4] = level;
         header[5] = FLAG_ENCRYPTED;
         header[6] = KDF_ARGON2ID;
@@ -210,7 +210,7 @@ impl<R: Read> Decryptor<R> {
         if header[0..3] != MAGIC[..] {
             return Err(Error::Corrupt("bad magic bytes".into()));
         }
-        if header[3] != VERSION {
+        if header[3] != ENVELOPE_VERSION {
             return Err(Error::Corrupt(format!("unsupported version {}", header[3])));
         }
         if header[5] & FLAG_ENCRYPTED == 0 {

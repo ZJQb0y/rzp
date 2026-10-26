@@ -168,6 +168,148 @@ impl<'a> BitReader<'a> {
     }
 }
 
+/// 位写入器：按最低有效位在前（LSB-first）累积比特。
+pub struct LsbWriter {
+    buf: Vec<u8>,
+    acc: u32,
+    nbits: u32,
+    /// 已写入的总位数。
+    bit_count: usize,
+}
+
+impl LsbWriter {
+    pub fn new() -> Self {
+        LsbWriter {
+            buf: Vec::with_capacity(1024),
+            acc: 0,
+            nbits: 0,
+            bit_count: 0,
+        }
+    }
+
+    /// 写入 `value` 的低 `count` 位，LSB-first（最低位先写出）。
+    #[inline]
+    pub fn write_bits(&mut self, value: u32, count: u32) {
+        debug_assert!(count <= 32);
+        self.bit_count += count as usize;
+        let mut v = value;
+        let mut remaining = count;
+        while remaining > 0 {
+            if self.nbits == 8 {
+                self.buf.push(self.acc as u8);
+                self.acc = 0;
+                self.nbits = 0;
+            }
+            let space = 8 - self.nbits;
+            let take = remaining.min(space);
+            let bits = v & ((1u32 << take) - 1);
+            self.acc |= bits << self.nbits;
+            self.nbits += take;
+            v >>= take;
+            remaining -= take;
+        }
+    }
+
+    /// 结束写入：剩余不足一字节的部分直接写出（低位对齐，高位补零）。
+    pub fn finish(mut self) -> Vec<u8> {
+        if self.nbits > 0 {
+            self.buf.push(self.acc as u8);
+        }
+        self.buf
+    }
+
+    /// 结束写入，并把整段位序列反转后写出。
+    ///
+    /// 供 FSE 使用：zstd 的 FSE 符号流是「反向」的（编码时反向遍历符号，初始状态
+    /// 最后写出），解码端正向读取。把位序列反转等价于「初始状态在前」，从而可用
+    /// 正向 [`LsbReader`] 解码。
+    pub fn finish_reversed(self) -> Vec<u8> {
+        let total = self.bit_count;
+        let mut out = vec![0u8; total.div_ceil(8)];
+        for i in 0..total {
+            let bit = self.get_bit(i);
+            let dst = total - 1 - i;
+            if bit {
+                out[dst / 8] |= 1 << (dst % 8);
+            }
+        }
+        out
+    }
+
+    /// 读取第 `idx` 个写入的位（0-based，按写入顺序）。
+    fn get_bit(&self, idx: usize) -> bool {
+        let byte_bits = self.buf.len() * 8;
+        if idx < byte_bits {
+            (self.buf[idx / 8] >> (idx % 8)) & 1 != 0
+        } else {
+            (self.acc >> (idx - byte_bits)) & 1 != 0
+        }
+    }
+}
+
+impl Default for LsbWriter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// 位读取器：按 LSB-first 从字节切片读取比特。
+pub struct LsbReader<'a> {
+    data: &'a [u8],
+    /// 当前字节内的已读位位置。
+    pos_bit: usize,
+    /// 当前读取到的字节索引。
+    pos_byte: usize,
+}
+
+impl<'a> LsbReader<'a> {
+    pub fn new(data: &'a [u8]) -> Self {
+        LsbReader {
+            data,
+            pos_bit: 0,
+            pos_byte: 0,
+        }
+    }
+
+    /// 已读出的总位数。
+    pub fn bits_read(&self) -> usize {
+        self.pos_byte * 8 + self.pos_bit
+    }
+
+    /// 剩余可读位数。
+    pub fn remaining_bits(&self) -> usize {
+        self.data.len() * 8 - self.bits_read()
+    }
+
+    /// 读取 `count` 位，LSB-first。
+    pub fn read_bits(&mut self, count: usize) -> Result<u32> {
+        if count > 32 {
+            return corrupt("read_bits: too many bits requested");
+        }
+        if self.remaining_bits() < count {
+            return corrupt("unexpected end of bitstream");
+        }
+        let mut value = 0u32;
+        let mut shift = 0usize;
+        let mut remaining = count;
+        while remaining > 0 {
+            if self.pos_bit == 8 {
+                self.pos_bit = 0;
+                self.pos_byte += 1;
+            }
+            let byte = self.data[self.pos_byte];
+            let avail = 8 - self.pos_bit;
+            let take = remaining.min(avail);
+            let bits = ((byte >> self.pos_bit) as u32) & ((1u32 << take) - 1);
+            value |= bits << shift;
+            shift += take;
+            self.pos_bit += take;
+            remaining -= take;
+        }
+        Ok(value)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

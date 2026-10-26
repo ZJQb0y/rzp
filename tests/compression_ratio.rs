@@ -152,26 +152,26 @@ fn compression_ratio_regression() {
         Case {
             name: "text",
             data: text_corpus(128 * 1024),
-            best_max: 0.18,
-            l6_max: 0.19,
+            best_max: 0.17,
+            l6_max: 0.17,
         },
         Case {
             name: "code",
             data: code_corpus(128 * 1024),
-            best_max: 0.23,
-            l6_max: 0.24,
+            best_max: 0.21,
+            l6_max: 0.22,
         },
         Case {
             name: "json",
             data: json_corpus(128 * 1024),
-            best_max: 0.17,
-            l6_max: 0.18,
+            best_max: 0.16,
+            l6_max: 0.16,
         },
         Case {
             name: "redundant",
             data: redundant_corpus(128 * 1024),
-            best_max: 0.05,
-            l6_max: 0.05,
+            best_max: 0.03,
+            l6_max: 0.03,
         },
     ];
 

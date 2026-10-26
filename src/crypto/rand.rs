@@ -22,10 +22,7 @@ pub fn fill_bytes(buf: &mut [u8]) -> io::Result<()> {
     }
     let ok = unsafe { SystemFunction036(buf.as_mut_ptr(), buf.len() as u32) };
     if ok == 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            "RtlGenRandom failed",
-        ));
+        return Err(io::Error::new(io::ErrorKind::Other, "RtlGenRandom failed"));
     }
     Ok(())
 }

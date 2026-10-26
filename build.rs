@@ -29,7 +29,8 @@ fn main() {
 
     let out = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
     let rc_file = out.join("version.rc");
-    std::fs::write(&rc_file, generate_rc(&version, icon_rc.as_deref())).expect("写入 version.rc 失败");
+    std::fs::write(&rc_file, generate_rc(&version, icon_rc.as_deref()))
+        .expect("写入 version.rc 失败");
 
     // 1) MSVC：rc.exe 编译为 .res，直接交给 link.exe。
     if let Some(rc) = find_rc_exe(arch_dir()) {
@@ -68,17 +69,16 @@ fn main() {
         return;
     }
 
-    println!("cargo:warning=未找到 rc.exe / windres，跳过嵌入版本资源（文件属性将缺少「详细信息」）");
+    println!(
+        "cargo:warning=未找到 rc.exe / windres，跳过嵌入版本资源（文件属性将缺少「详细信息」）"
+    );
     emit_rerun();
 }
 
 /// 生成独立的 `.rc` 内容（用数值常量替代 `#include <windows.h>`，
 /// 从而无需配置 INCLUDE 环境变量即可编译）。
 fn generate_rc(version: &str, icon: Option<&str>) -> String {
-    let mut parts: Vec<u32> = version
-        .split('.')
-        .map(|p| p.parse().unwrap_or(0))
-        .collect();
+    let mut parts: Vec<u32> = version.split('.').map(|p| p.parse().unwrap_or(0)).collect();
     while parts.len() < 4 {
         parts.push(0);
     }

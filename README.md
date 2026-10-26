@@ -18,7 +18,7 @@
 
 ```bash
 git clone <repo>
-cd RZP_1.6.1
+cd RZP_2.0.0
 cargo build --release          # 产物在 target/release/rzp
 
 # 交叉编译 Windows 版本（需先安装对应目标与 mingw-w64 链接器）

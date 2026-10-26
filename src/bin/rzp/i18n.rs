@@ -35,10 +35,7 @@ fn detect() -> Lang {
 /// 判断是否为繁体中文本地化（不在支持范围内，回退英文）。
 #[cfg(unix)]
 fn is_traditional_chinese(lower: &str) -> bool {
-    lower.contains("tw")
-        || lower.contains("hk")
-        || lower.contains("mo")
-        || lower.contains("hant")
+    lower.contains("tw") || lower.contains("hk") || lower.contains("mo") || lower.contains("hant")
 }
 
 /// Windows：`GetUserDefaultUILanguage` 返回 LANGID，简体中文（zh-CN / zh-SG）映射为中文。
@@ -265,7 +262,8 @@ const ZH: Messages = Messages {
   cat a.txt | rzp c - > a.rzp -> 从 stdin 压缩到 stdout
 "#,
     error: "错误",
-    err_password_required: "归档已加密，请用 -p/--password/--password-file/RZP_PASSWORD 或 --ask-pass 提供密码",
+    err_password_required:
+        "归档已加密，请用 -p/--password/--password-file/RZP_PASSWORD 或 --ask-pass 提供密码",
     err_auth_failed: "密码错误或归档数据被篡改（认证失败）",
     prompt_password: "请输入密码: ",
     ask_pass_requires_tty: "--ask-pass 需要交互式终端（stdin 不是终端）",

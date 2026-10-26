@@ -56,7 +56,7 @@ mod platform {
     #[cfg(unix)]
     pub fn meta_mode(meta: &fs::Metadata) -> u32 {
         use std::os::unix::fs::MetadataExt;
-        (meta.mode() & 0o7777) as u32
+        meta.mode() & 0o7777
     }
 
     #[cfg(windows)]

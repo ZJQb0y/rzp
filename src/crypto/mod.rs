@@ -15,8 +15,8 @@ pub mod stream;
 use crate::error::{Error, Result};
 use crate::format::{
     AEAD_CHACHA20_POLY1305, AEAD_CHUNK_SIZE, ARGON2_MAX_ITERATIONS, ARGON2_MAX_LANES,
-    ARGON2_MAX_MEMORY_KIB, ENC_HEADER_SIZE, FLAG_ENCRYPTED, KCV_LEN, KDF_ARGON2ID, MAGIC,
-    NONCE_LEN, SALT_LEN, TAG_LEN, VERSION,
+    ARGON2_MAX_MEMORY_KIB, ENC_HEADER_SIZE, ENVELOPE_VERSION, FLAG_ENCRYPTED, KCV_LEN,
+    KDF_ARGON2ID, MAGIC, NONCE_LEN, SALT_LEN, TAG_LEN,
 };
 
 /// Argon2 类型标识：Argon2id。
@@ -103,7 +103,8 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 /// 用密码把一段内层明文 RZP 流加密为 v4 信封（Argon2id + 分块 AEAD）。
 ///
 /// 信封布局见 `FORMAT.md`：外层头(28) + salt(16) + nonce(12) + 总长(8) +
-/// 分块密文流（每块后跟 16 字节 tag）。
+/// 分块密文流（每块后跟 16 字节 tag）。信封版本与内层流版本解耦，恒为
+/// [`ENVELOPE_VERSION`]。
 pub fn encrypt_envelope(
     inner: &[u8],
     level: u8,
@@ -132,7 +133,7 @@ pub fn encrypt_envelope(
     // 外层头。
     let mut header = [0u8; ENC_HEADER_SIZE];
     header[0..3].copy_from_slice(&MAGIC);
-    header[3] = VERSION;
+    header[3] = ENVELOPE_VERSION;
     header[4] = level;
     header[5] = FLAG_ENCRYPTED;
     header[6] = KDF_ARGON2ID;
@@ -183,7 +184,7 @@ pub fn decrypt_envelope(data: &[u8], password: &[u8]) -> Result<Vec<u8>> {
     if header[0..3] != MAGIC[..] {
         return Err(Error::Corrupt("bad magic bytes".into()));
     }
-    if header[3] != VERSION {
+    if header[3] != ENVELOPE_VERSION {
         return Err(Error::Corrupt(format!("unsupported version {}", header[3])));
     }
     if header[5] & FLAG_ENCRYPTED == 0 {

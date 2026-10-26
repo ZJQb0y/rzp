@@ -446,9 +446,9 @@ fn parse_opts(args: &[String]) -> Result<(Opts, Vec<String>)> {
                 if i >= args.len() {
                     return Err(rzp::Error::Io(msgs().opt_argon2_memory_requires_kib.into()));
                 }
-                let n: u32 = args[i].parse().map_err(|_| {
-                    rzp::Error::Io(tr!(msgs().invalid_argon2_memory, args[i]))
-                })?;
+                let n: u32 = args[i]
+                    .parse()
+                    .map_err(|_| rzp::Error::Io(tr!(msgs().invalid_argon2_memory, args[i])))?;
                 if n == 0 || n > rzp::ARGON2_MAX_MEMORY_KIB {
                     return Err(rzp::Error::Io(tr!(
                         msgs().argon2_memory_range,
@@ -462,9 +462,9 @@ fn parse_opts(args: &[String]) -> Result<(Opts, Vec<String>)> {
                 if i >= args.len() {
                     return Err(rzp::Error::Io(msgs().opt_argon2_iters_requires_n.into()));
                 }
-                let n: u32 = args[i].parse().map_err(|_| {
-                    rzp::Error::Io(tr!(msgs().invalid_argon2_iters, args[i]))
-                })?;
+                let n: u32 = args[i]
+                    .parse()
+                    .map_err(|_| rzp::Error::Io(tr!(msgs().invalid_argon2_iters, args[i])))?;
                 if n == 0 || n > rzp::ARGON2_MAX_ITERATIONS {
                     return Err(rzp::Error::Io(tr!(
                         msgs().argon2_iters_range,
@@ -898,7 +898,11 @@ fn compress_one(
         };
         eprintln!(
             "{}: {} -> {} ({input_len} -> {out_len} {}, {ratio:.1}%)",
-            style::paint(msgs().status_compressed, style::Color::Green, style::stderr_tty()),
+            style::paint(
+                msgs().status_compressed,
+                style::Color::Green,
+                style::stderr_tty()
+            ),
             label(input, true),
             label(output, false),
             msgs().bytes
@@ -943,7 +947,11 @@ fn compress_one(
     };
     eprintln!(
         "{}: {} -> {} ({input_len} -> {out_len} {}, {ratio:.1}%)",
-        style::paint(msgs().status_compressed, style::Color::Green, style::stderr_tty()),
+        style::paint(
+            msgs().status_compressed,
+            style::Color::Green,
+            style::stderr_tty()
+        ),
         label(input, true),
         label(output, false),
         msgs().bytes
@@ -971,7 +979,11 @@ fn decompress_one(
         maybe_remove_input(input, output, keep);
         eprintln!(
             "{}: {} -> {} {}",
-            style::paint(msgs().status_decompressed, style::Color::Green, style::stderr_tty()),
+            style::paint(
+                msgs().status_decompressed,
+                style::Color::Green,
+                style::stderr_tty()
+            ),
             label(input, true),
             label(output, false),
             msgs().dir_archive
@@ -989,7 +1001,11 @@ fn decompress_one(
         maybe_remove_input(input, output, keep);
         eprintln!(
             "{}: {} -> {} {}",
-            style::paint(msgs().status_decompressed, style::Color::Green, style::stderr_tty()),
+            style::paint(
+                msgs().status_decompressed,
+                style::Color::Green,
+                style::stderr_tty()
+            ),
             label(input, true),
             label(output, false),
             msgs().dir_archive
@@ -1017,7 +1033,11 @@ fn decompress_one(
 
     eprintln!(
         "{}: {} -> {} ({} {})",
-        style::paint(msgs().status_decompressed, style::Color::Green, style::stderr_tty()),
+        style::paint(
+            msgs().status_decompressed,
+            style::Color::Green,
+            style::stderr_tty()
+        ),
         label(input, true),
         label(output, false),
         decoder.total_out(),
@@ -1051,7 +1071,11 @@ fn print_info(input: &Path, info: &rzp::Info) {
     );
     eprintln!(
         "{}: {} {}",
-        style::paint(msgs().compressed_size, style::Color::Cyan, style::stderr_tty()),
+        style::paint(
+            msgs().compressed_size,
+            style::Color::Cyan,
+            style::stderr_tty()
+        ),
         info.compressed_size,
         msgs().bytes
     );
@@ -1062,7 +1086,11 @@ fn print_info(input: &Path, info: &rzp::Info) {
     eprintln!(
         "{}: {}",
         style::paint(msgs().dictionary, style::Color::Cyan, style::stderr_tty()),
-        if info.has_dictionary { msgs().yes } else { msgs().no }
+        if info.has_dictionary {
+            msgs().yes
+        } else {
+            msgs().no
+        }
     );
     eprintln!(
         "{}: {} ({} {}, {} {})",
@@ -1118,7 +1146,11 @@ fn info_one(input: &Path, password: Option<&str>) -> Result<()> {
         );
         eprintln!(
             "{}: {} {}",
-            style::paint(msgs().entry_data_size, style::Color::Cyan, style::stderr_tty()),
+            style::paint(
+                msgs().entry_data_size,
+                style::Color::Cyan,
+                style::stderr_tty()
+            ),
             total_comp,
             msgs().bytes
         );
@@ -1131,7 +1163,11 @@ fn info_one(input: &Path, password: Option<&str>) -> Result<()> {
         eprintln!(
             "{}: {}",
             style::paint(msgs().encrypted, style::Color::Cyan, style::stderr_tty()),
-            if password.is_some() { msgs().yes } else { msgs().no }
+            if password.is_some() {
+                msgs().yes
+            } else {
+                msgs().no
+            }
         );
         return Ok(());
     }
@@ -1147,7 +1183,11 @@ fn info_one(input: &Path, password: Option<&str>) -> Result<()> {
     if encrypted {
         eprintln!(
             "{}: {} {}",
-            style::paint(msgs().outer_archive_size, style::Color::Cyan, style::stderr_tty()),
+            style::paint(
+                msgs().outer_archive_size,
+                style::Color::Cyan,
+                style::stderr_tty()
+            ),
             file_len(input),
             msgs().bytes
         );
@@ -1180,7 +1220,11 @@ fn test_one(input: &Path, dict: &[u8], threads: usize, password: Option<&str>) -
         "{}: {} {}",
         style::paint(msgs().verified, style::Color::Green, style::stderr_tty()),
         label(input, true),
-        tr!(msgs().verified_detail, decoder.level().as_u8(), decoder.total_out())
+        tr!(
+            msgs().verified_detail,
+            decoder.level().as_u8(),
+            decoder.total_out()
+        )
     );
     Ok(())
 }
@@ -1353,7 +1397,11 @@ fn compress_dir(
         maybe_remove_input_dir(dir, output, keep);
         eprintln!(
             "{}: {} -> {} {}",
-            style::paint(msgs().status_compressed, style::Color::Green, style::stderr_tty()),
+            style::paint(
+                msgs().status_compressed,
+                style::Color::Green,
+                style::stderr_tty()
+            ),
             label(dir, true),
             label(output, false),
             tr!(msgs().dir_archive_bytes, out_len)
@@ -1382,7 +1430,11 @@ fn compress_dir(
 
     eprintln!(
         "{}: {} -> {} {}",
-        style::paint(msgs().status_compressed, style::Color::Green, style::stderr_tty()),
+        style::paint(
+            msgs().status_compressed,
+            style::Color::Green,
+            style::stderr_tty()
+        ),
         label(dir, true),
         label(output, false),
         tr!(msgs().dir_archive_bytes, out_len)
@@ -1722,11 +1774,7 @@ fn print_bench(rows: &[BenchRow]) {
     let tty = style::stdout_tty();
     println!(
         "{}",
-        style::paint(
-            msgs().bench_title,
-            style::Color::Bold,
-            tty
-        )
+        style::paint(msgs().bench_title, style::Color::Bold, tty)
     );
     println!();
 
@@ -1766,7 +1814,10 @@ fn print_bench(rows: &[BenchRow]) {
         }
     }
     if totals.0 > 0 {
-        println!("{}", style::paint(msgs().bench_summary, style::Color::Bold, tty));
+        println!(
+            "{}",
+            style::paint(msgs().bench_summary, style::Color::Bold, tty)
+        );
         println!(
             "{}",
             tr!(
@@ -1840,8 +1891,7 @@ fn dur(secs: f64) -> String {
 
 /// 读取预设字典文件（整个文件内容，交由库内部截断到有效窗口）。
 fn read_dict(path: &Path) -> Result<Vec<u8>> {
-    std::fs::read(path)
-        .map_err(|e| rzp::Error::Io(tr!(msgs().cannot_read_dict, path.display(), e)))
+    std::fs::read(path).map_err(|e| rzp::Error::Io(tr!(msgs().cannot_read_dict, path.display(), e)))
 }
 fn open_input(path: &Path) -> Result<Box<dyn Read>> {
     if path == Path::new("-") {
@@ -1860,10 +1910,7 @@ fn create_output_writer(path: &Path, force: bool) -> Result<Box<dyn Write>> {
         Ok(Box::new(BufWriter::new(std::io::stdout())))
     } else {
         if path.exists() && !force {
-            return Err(rzp::Error::Io(tr!(
-                msgs().output_exists,
-                path.display()
-            )));
+            return Err(rzp::Error::Io(tr!(msgs().output_exists, path.display())));
         }
         Ok(Box::new(BufWriter::with_capacity(
             64 * 1024,
@@ -2051,7 +2098,10 @@ fn maybe_remove_input(input: &Path, output: &Path, keep: bool) {
         return;
     }
     if let Err(e) = std::fs::remove_file(input) {
-        eprintln!("{}", tr!(msgs().warn_cannot_remove_input, input.display(), e));
+        eprintln!(
+            "{}",
+            tr!(msgs().warn_cannot_remove_input, input.display(), e)
+        );
     }
 }
 
@@ -2061,10 +2111,7 @@ fn maybe_remove_input_dir(input: &Path, output: &Path, keep: bool) {
         return;
     }
     if output.starts_with(input) {
-        eprintln!(
-            "{}",
-            tr!(msgs().warn_output_inside_input, input.display())
-        );
+        eprintln!("{}", tr!(msgs().warn_output_inside_input, input.display()));
         return;
     }
     if let Err(e) = std::fs::remove_dir_all(input) {

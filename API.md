@@ -1,6 +1,6 @@
 # RZP 库 API 参考
 
-> 版本：`rzp 1.7.0`。crate 名 `rzp`，主入口 `src/lib.rs`。
+> 版本：`rzp 2.0.0`。crate 名 `rzp`，主入口 `src/lib.rs`。
 > 零第三方依赖，`std` only。
 
 ```rust
@@ -167,7 +167,7 @@ let (packed, stats) = enc.finish_with_stats()?;
 ### Decoder
 
 ```rust
-pub struct Decoder<R: Read> { /* ... */ }
+pub struct Decoder<R: Read + Send> { /* ... */ }
 ```
 
 实现 `std::io::Read`，按需读取并解压，解码结束时校验 CRC 与总长。构造方式：
@@ -200,6 +200,10 @@ dec.read_to_end(&mut out)?; // 结束时自动校验完整性
 
 > `Decoder::read_into` 与 `Read::read` 行为一致，但直接返回 `rzp::Result`，
 > 便于区分 `Error::PasswordRequired`、`Error::ChecksumMismatch` 等。
+
+> 解压端在内部采用「读入预取」：解压当前批的同时于后台线程读入下一批块头/块数据，
+> 使磁盘读入与解压延迟重叠；因此 `Decoder` 的读取器类型需满足 `Send`。解压结果仍按原始
+> 顺序输出，健壮性校验（块尺寸上限、尾部校验、字典 CRC、损坏检测）语义不变。
 
 ---
 

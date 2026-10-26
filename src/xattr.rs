@@ -39,8 +39,9 @@ mod imp {
     }
 
     fn name_cstring(name: &[u8]) -> io::Result<std::ffi::CString> {
-        std::ffi::CString::new(name)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "xattr name contains NUL byte"))
+        std::ffi::CString::new(name).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "xattr name contains NUL byte")
+        })
     }
 
     /// 列出路径上的全部 xattr 名字（不含 NUL 终止符）。
@@ -56,7 +57,8 @@ mod imp {
                 return Ok(Vec::new());
             }
             let mut buf = vec![0u8; size as usize];
-            let n = unsafe { llistxattr(cpath.as_ptr(), buf.as_mut_ptr() as *mut c_char, buf.len()) };
+            let n =
+                unsafe { llistxattr(cpath.as_ptr(), buf.as_mut_ptr() as *mut c_char, buf.len()) };
             if n < 0 {
                 return Err(io::Error::last_os_error());
             }
@@ -77,7 +79,8 @@ mod imp {
     pub fn get_xattr(path: &Path, name: &[u8]) -> io::Result<Vec<u8>> {
         let cpath = path_cstring(path)?;
         let cname = name_cstring(name)?;
-        let mut size = unsafe { lgetxattr(cpath.as_ptr(), cname.as_ptr(), std::ptr::null_mut(), 0) };
+        let mut size =
+            unsafe { lgetxattr(cpath.as_ptr(), cname.as_ptr(), std::ptr::null_mut(), 0) };
         if size < 0 {
             return Err(io::Error::last_os_error());
         }

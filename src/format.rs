@@ -2,8 +2,55 @@
 
 /// 文件魔数："RZP"。
 pub const MAGIC: [u8; 3] = *b"RZP";
-/// 当前格式版本。
-pub const VERSION: u8 = 4;
+
+/// 历史格式版本 4（只读兼容）。
+pub const VERSION_V4: u8 = 4;
+/// 格式版本 5（当前可写）。
+pub const FORMAT_V5: u8 = 5;
+/// 加密信封版本（与流版本解耦；信封布局保持 v4 不变）。
+pub const ENVELOPE_VERSION: u8 = 4;
+/// 当前格式版本（编码器默认产出）。
+pub const VERSION: u8 = FORMAT_V5;
+
+/// 格式版本。
+///
+/// 解码端对 [`FormatVersion::V4`] 永久只读兼容；编码端默认仅产出
+/// [`FormatVersion::V5`]（在 M3 收尾阶段切换，此前通过开关回退 V4）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum FormatVersion {
+    /// 历史版本 4：只读兼容。
+    V4 = 4,
+    /// 版本 5：当前可写。
+    V5 = 5,
+}
+
+impl FormatVersion {
+    /// 由版本字节解析；未知版本返回 `None`。
+    pub fn from_u8(v: u8) -> Option<FormatVersion> {
+        match v {
+            VERSION_V4 => Some(FormatVersion::V4),
+            FORMAT_V5 => Some(FormatVersion::V5),
+            _ => None,
+        }
+    }
+
+    /// 返回版本字节。
+    pub fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// 是否可由编码器写出。
+    pub fn is_writable(self) -> bool {
+        matches!(self, FormatVersion::V5)
+    }
+}
+
+impl Default for FormatVersion {
+    /// 编码器默认产出格式。
+    fn default() -> Self {
+        FormatVersion::V5
+    }
+}
 
 /// 头大小（魔数 3 + 版本 1 + 级别 1 + 标志 1 + 保留 2）。
 pub const HEADER_SIZE: usize = 8;
@@ -78,6 +125,11 @@ pub const BTYPE_COMPRESSED: u8 = 1;
 /// 块类型：LZ77 + 静态（固定）Huffman 压缩，无需在块内发送码长。
 pub const BTYPE_FIXED: u8 = 2;
 
+/// 块类型：LZ77 + 动态 FSE（tANS）压缩（V5）。
+pub const BTYPE_FSE_DYNAMIC: u8 = 3;
+/// 块类型：LZ77 + 静态（固定）FSE 压缩，块内不发送归一化计数（V5）。
+pub const BTYPE_FSE_FIXED: u8 = 4;
+
 /// 最大/默认块大小（未压缩）。
 pub const BLOCK_SIZE: usize = 1_048_576;
 /// 允许的最大块大小上限（供解压端健壮性校验，防恶意超大块）。
@@ -87,8 +139,10 @@ pub const MAX_BLOCK_SIZE: usize = 64 * 1024 * 1024;
 pub const MIN_MATCH: usize = 3;
 /// 最大匹配长度。
 pub const MAX_MATCH: usize = 258;
-/// 最大回溯距离（1 MiB 窗口）。
+/// 最大回溯距离（V4 的 1 MiB 窗口）。
 pub const MAX_DIST: usize = 1_048_576;
+/// V5 的最大回溯距离（32 MiB 窗口）。
+pub const MAX_WINDOW_SIZE: usize = 32 * 1024 * 1024;
 
 /// Huffman 码最大长度（位）。
 pub const MAX_BITS: usize = 15;
@@ -101,6 +155,13 @@ pub const LEN_SYMBOL_BASE: u16 = 257;
 pub const LITLEN_SYMBOLS: usize = 286;
 /// 距离表大小：40 个距离码（覆盖 1..=MAX_DIST）。
 pub const DIST_SYMBOLS: usize = 40;
+/// V5 距离表大小：50 个距离码（覆盖 1..=MAX_WINDOW_SIZE）。
+pub const V5_DIST_SYMBOLS: usize = 50;
+
+/// V5 距离字母表中的重复偏移符号数（rep0/rep1/rep2）。
+pub const REP_SYMBOLS: usize = 3;
+/// V5 距离字母表总大小：3 个重复偏移 + 50 个字面量距离码。
+pub const V5_DIST_ALPHABET: usize = REP_SYMBOLS + V5_DIST_SYMBOLS;
 
 /// 每个长度码对应的额外位数。
 pub const LENGTH_EXTRA_BITS: [u8; 29] = [
@@ -126,6 +187,20 @@ pub const DIST_BASE: [u32; 40] = [
     262145, 393217, 524289, 786433,
 ];
 
+/// V5 每个距离码对应的额外位数（沿 V4 几何增长规律扩展到额外位 23，覆盖 2^25）。
+pub const V5_DIST_EXTRA_BITS: [u8; 50] = [
+    0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13,
+    13, 14, 14, 15, 15, 16, 16, 17, 17, 18, 18, 19, 19, 20, 20, 21, 21, 22, 22, 23, 23,
+];
+
+/// V5 每个距离码对应的基准距离。
+pub const V5_DIST_BASE: [u32; 50] = [
+    1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537,
+    2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577, 32769, 49153, 65537, 98305, 131073, 196609,
+    262145, 393217, 524289, 786433, 1048577, 1572865, 2097153, 3145729, 4194305, 6291457, 8388609,
+    12582913, 16777217, 25165825,
+];
+
 /// 由匹配长度（3..=258）查找长度码（0..=28）。
 pub fn length_code(len: usize) -> u16 {
     debug_assert!((MIN_MATCH..=MAX_MATCH).contains(&len));
@@ -148,6 +223,19 @@ pub fn dist_code(dist: usize) -> u16 {
     let mut code = 0u16;
     while code < (DIST_SYMBOLS - 1) as u16
         && dist as u32 > DIST_BASE[code as usize] + ((1u32 << DIST_EXTRA_BITS[code as usize]) - 1)
+    {
+        code += 1;
+    }
+    code
+}
+
+/// 由距离（1..=MAX_WINDOW_SIZE）查找 V5 距离码（0..=V5_DIST_SYMBOLS-1）。
+pub fn dist_code_v5(dist: usize) -> u16 {
+    debug_assert!((1..=MAX_WINDOW_SIZE).contains(&dist));
+    let mut code = 0u16;
+    while code < (V5_DIST_SYMBOLS - 1) as u16
+        && dist as u32
+            > V5_DIST_BASE[code as usize] + ((1u32 << V5_DIST_EXTRA_BITS[code as usize]) - 1)
     {
         code += 1;
     }

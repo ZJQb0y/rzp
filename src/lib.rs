@@ -27,6 +27,7 @@ mod crc32;
 mod crypto;
 mod error;
 mod format;
+mod fse;
 mod huffman;
 mod lz77;
 mod stream;
@@ -34,7 +35,7 @@ mod xattr;
 
 pub use error::{Error, Result};
 pub use format::{
-    ARGON2_DEFAULT_ITERATIONS, ARGON2_DEFAULT_LANES, ARGON2_DEFAULT_MEMORY_KIB,
+    FormatVersion, ARGON2_DEFAULT_ITERATIONS, ARGON2_DEFAULT_LANES, ARGON2_DEFAULT_MEMORY_KIB,
     ARGON2_MAX_ITERATIONS, ARGON2_MAX_LANES, ARGON2_MAX_MEMORY_KIB, BLOCK_SIZE, MAX_BLOCK_SIZE,
     VERSION,
 };
@@ -103,11 +104,16 @@ impl Level {
     }
 
     /// 该级别对应的匹配器配置；级别 0 返回 `None`（仅存储）。
+    ///
+    /// 窗口大小按 V5（32 MiB 上限）配置；编码时由 codec 层再按格式版本裁剪
+    /// （V4 裁剪到 [`MAX_DIST`]，V5 裁剪到 [`MAX_WINDOW_SIZE`]）。
     pub(crate) fn match_config(self) -> Option<MatchConfig> {
-        use crate::format::MAX_DIST;
+        use crate::format::MAX_WINDOW_SIZE;
+        use crate::lz77::MatchFinder;
         match self {
             Level::L0 => None,
             Level::L1 => Some(MatchConfig {
+                finder: MatchFinder::HashChain3,
                 window_size: 4096,
                 max_chain: 4,
                 nice_len: 8,
@@ -116,6 +122,7 @@ impl Level {
                 optimal: false,
             }),
             Level::L2 => Some(MatchConfig {
+                finder: MatchFinder::HashChain3,
                 window_size: 8192,
                 max_chain: 16,
                 nice_len: 16,
@@ -124,6 +131,7 @@ impl Level {
                 optimal: false,
             }),
             Level::L3 => Some(MatchConfig {
+                finder: MatchFinder::HashChain3,
                 window_size: 16384,
                 max_chain: 32,
                 nice_len: 32,
@@ -132,6 +140,7 @@ impl Level {
                 optimal: false,
             }),
             Level::L4 => Some(MatchConfig {
+                finder: MatchFinder::HashChain3,
                 window_size: 32768,
                 max_chain: 64,
                 nice_len: 64,
@@ -140,6 +149,7 @@ impl Level {
                 optimal: false,
             }),
             Level::L5 => Some(MatchConfig {
+                finder: MatchFinder::HashChain3,
                 window_size: 65536,
                 max_chain: 128,
                 nice_len: 128,
@@ -148,6 +158,7 @@ impl Level {
                 optimal: false,
             }),
             Level::L6 => Some(MatchConfig {
+                finder: MatchFinder::HashChain4,
                 window_size: 131072,
                 max_chain: 256,
                 nice_len: 128,
@@ -156,7 +167,8 @@ impl Level {
                 optimal: false,
             }),
             Level::L7 => Some(MatchConfig {
-                window_size: 262144,
+                finder: MatchFinder::BinaryTree,
+                window_size: 4 * 1024 * 1024,
                 max_chain: 512,
                 nice_len: 258,
                 lazy: true,
@@ -164,7 +176,8 @@ impl Level {
                 optimal: true,
             }),
             Level::L8 => Some(MatchConfig {
-                window_size: 524288,
+                finder: MatchFinder::BinaryTree,
+                window_size: 16 * 1024 * 1024,
                 max_chain: 1024,
                 nice_len: 258,
                 lazy: true,
@@ -172,7 +185,8 @@ impl Level {
                 optimal: true,
             }),
             Level::L9 => Some(MatchConfig {
-                window_size: MAX_DIST,
+                finder: MatchFinder::BinaryTree,
+                window_size: MAX_WINDOW_SIZE,
                 max_chain: 4096,
                 nice_len: 258,
                 lazy: true,
@@ -307,8 +321,9 @@ pub struct Info {
 /// 若流头标记为加密信封（`FLAG_ENCRYPTED`），则返回 [`Error::PasswordRequired`]。
 pub fn inspect<R: std::io::Read>(reader: &mut R) -> Result<Info> {
     use crate::format::{
-        footer_size, BLOCK_HEADER_SIZE, BTYPE_COMPRESSED, BTYPE_FIXED, BTYPE_STORED, DICT_CRC_SIZE,
-        FLAG_DICT, FLAG_ENCRYPTED, FLAG_FOOTER, HEADER_SIZE, MAGIC, MAX_BLOCK_SIZE, VERSION,
+        footer_size, FormatVersion, BLOCK_HEADER_SIZE, BTYPE_COMPRESSED, BTYPE_FIXED,
+        BTYPE_FSE_DYNAMIC, BTYPE_FSE_FIXED, BTYPE_STORED, DICT_CRC_SIZE, FLAG_DICT, FLAG_ENCRYPTED,
+        FLAG_FOOTER, HEADER_SIZE, MAGIC, MAX_BLOCK_SIZE,
     };
 
     let mut compressed_size: u64 = 0;
@@ -324,7 +339,7 @@ pub fn inspect<R: std::io::Read>(reader: &mut R) -> Result<Info> {
     if h[0..3] != MAGIC {
         return Err(Error::Corrupt("bad magic bytes".into()));
     }
-    if h[3] != VERSION {
+    if FormatVersion::from_u8(h[3]).is_none() {
         return Err(Error::Corrupt(format!("unsupported version {}", h[3])));
     }
     if h[5] & FLAG_ENCRYPTED != 0 {
@@ -361,7 +376,9 @@ pub fn inspect<R: std::io::Read>(reader: &mut R) -> Result<Info> {
         }
         match btype {
             BTYPE_STORED => stored_blocks += 1,
-            BTYPE_COMPRESSED | BTYPE_FIXED => compressed_blocks += 1,
+            BTYPE_COMPRESSED | BTYPE_FIXED | BTYPE_FSE_DYNAMIC | BTYPE_FSE_FIXED => {
+                compressed_blocks += 1
+            }
             _ => return Err(Error::Corrupt(format!("unknown block type {btype}"))),
         }
 

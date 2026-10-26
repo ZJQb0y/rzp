@@ -14,7 +14,7 @@ use crate::format::MAX_BITS;
 
 /// 由频率计算每个符号的码长（0 表示该符号未出现）。
 ///
-/// 使用最小堆构建 Huffman 树；若出现码长超过 [`MAX_BITS`]，则退化为定长码。
+/// 使用最小堆构建 Huffman 树；若码长超过 [`MAX_BITS`]，则用 package-merge 求最优限长码。
 /// 对任意字母表大小（如字面量/长度表或距离表）均适用。
 pub fn compute_lengths(freqs: &[u32]) -> Vec<u8> {
     // 收集出现过的符号。

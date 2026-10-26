@@ -13,9 +13,9 @@ use crate::crc32::{crc32, Crc32};
 use crate::crypto::blake2b::Blake2b;
 use crate::error::{Error, Result};
 use crate::format::{
-    BLAKE2B_DIGEST_SIZE, BLOCK_HEADER_SIZE, BLOCK_SIZE, BTYPE_STORED, DICT_CRC_SIZE, FLAG_BLAKE2B,
-    FLAG_DICT, FLAG_DIR, FLAG_ENCRYPTED, FLAG_FOOTER, FOOTER_SIZE, FOOTER_STRONG_SIZE, HEADER_SIZE,
-    MAGIC, MAX_BLOCK_SIZE, MAX_DIST, VERSION,
+    FormatVersion, BLAKE2B_DIGEST_SIZE, BLOCK_HEADER_SIZE, BLOCK_SIZE, BTYPE_STORED, DICT_CRC_SIZE,
+    FLAG_BLAKE2B, FLAG_DICT, FLAG_DIR, FLAG_ENCRYPTED, FLAG_FOOTER, FOOTER_SIZE,
+    FOOTER_STRONG_SIZE, HEADER_SIZE, MAGIC, MAX_BLOCK_SIZE, MAX_WINDOW_SIZE,
 };
 use crate::lz77::MatchConfig;
 use crate::Level;
@@ -30,10 +30,10 @@ fn io_to_rzp(e: io::Error) -> Error {
     Error::Io(e.to_string())
 }
 
-/// 取字典中真正参与匹配的后缀（最多 [`MAX_DIST`] 字节）。
+/// 取字典中真正参与匹配的后缀（最多 [`MAX_WINDOW_SIZE`] 字节）。
 fn effective_dict(dict: &[u8]) -> &[u8] {
-    if dict.len() > MAX_DIST {
-        &dict[dict.len() - MAX_DIST..]
+    if dict.len() > MAX_WINDOW_SIZE {
+        &dict[dict.len() - MAX_WINDOW_SIZE..]
     } else {
         dict
     }
@@ -86,6 +86,9 @@ impl Checksum {
     }
 }
 
+/// 块规格：`(块类型, 块数据, 原始长度)`。
+type BlockSpec = (u8, Vec<u8>, usize);
+
 /// RZP 流式编码器。
 pub struct Encoder<W: Write> {
     inner: W,
@@ -104,6 +107,56 @@ pub struct Encoder<W: Write> {
     header_written: bool,
     dict: Vec<u8>,
     dir: bool,
+    /// 输出格式版本（默认见 [`FormatVersion::default`]）。
+    format_version: FormatVersion,
+}
+
+/// 已预取的一批块规格。
+struct PrefetchedBatch {
+    /// 块规格列表。
+    specs: Vec<BlockSpec>,
+    /// 该批是否读到结束块（`final_flag`）。
+    final_seen: bool,
+}
+
+/// 读取一批块规格：返回 `(specs, final_seen)`。最多读取 `threads` 个块；
+/// 读到结束块即停止（不再继续读，把尾部留给调用方）。
+fn read_specs<R: Read>(
+    inner: &mut R,
+    threads: usize,
+    comp_total: &mut u64,
+) -> Result<(Vec<BlockSpec>, bool)> {
+    let mut specs: Vec<(u8, Vec<u8>, usize)> = Vec::with_capacity(threads);
+    let mut final_seen = false;
+
+    for _ in 0..threads {
+        let mut bh = [0u8; BLOCK_HEADER_SIZE];
+        inner.read_exact(&mut bh).map_err(io_to_rzp)?;
+        *comp_total += BLOCK_HEADER_SIZE as u64;
+        let raw_len = u32::from_le_bytes([bh[0], bh[1], bh[2], bh[3]]) as usize;
+        let comp_len = u32::from_le_bytes([bh[4], bh[5], bh[6], bh[7]]) as usize;
+        let final_flag = bh[8];
+        let btype = bh[9];
+
+        // 健壮性：拒绝异常尺寸，防止损坏输入导致超量分配。
+        if raw_len > MAX_BLOCK_SIZE || comp_len > MAX_BLOCK_SIZE {
+            return Err(Error::InvalidSize(format!(
+                "block size out of range: raw={raw_len} comp={comp_len}"
+            )));
+        }
+
+        let mut cdata = vec![0u8; comp_len];
+        inner.read_exact(&mut cdata).map_err(io_to_rzp)?;
+        *comp_total += comp_len as u64;
+
+        specs.push((btype, cdata, raw_len));
+        if final_flag != 0 {
+            final_seen = true;
+            break;
+        }
+    }
+
+    Ok((specs, final_seen))
 }
 
 impl<W: Write> Encoder<W> {
@@ -115,7 +168,7 @@ impl<W: Write> Encoder<W> {
     /// 以指定压缩级别与预设字典创建编码器。
     ///
     /// `dict` 作为输入的前置历史参与 LZ77 匹配，可显著提升小文件或共享
-    /// 前缀文件的压缩率；超过 [`MAX_DIST`] 的部分只取最后 [`MAX_DIST`] 字节。
+    /// 前缀文件的压缩率；超过 [`MAX_WINDOW_SIZE`] 的部分只取最后 [`MAX_WINDOW_SIZE`] 字节。
     pub fn with_dictionary(inner: W, level: Level, dict: &[u8]) -> Self {
         Self::with_config(inner, level, dict, false)
     }
@@ -142,6 +195,7 @@ impl<W: Write> Encoder<W> {
             header_written: false,
             dict: effective_dict(dict).to_vec(),
             dir,
+            format_version: FormatVersion::default(),
         }
     }
 
@@ -161,6 +215,23 @@ impl<W: Write> Encoder<W> {
     pub fn with_strong_checksum(mut self) -> Self {
         self.checksum = Checksum::blake2b();
         self
+    }
+
+    /// 设置输出格式版本（默认 [`FormatVersion::default`]）。
+    ///
+    /// 消费式构造器，便于链式调用。V4 仅用于回退输出；V5 为 M3 的新格式。
+    /// 解码端对 V4 永久只读兼容。
+    pub fn with_format_version(mut self, version: FormatVersion) -> Self {
+        self.format_version = version;
+        self
+    }
+
+    /// 强制按历史 V4 格式输出（与旧版本解码器兼容）。
+    ///
+    /// 等价于 [`with_format_version`](Self::with_format_version)`(FormatVersion::V4)`，
+    /// 供 M3 升级期间回退使用。
+    pub fn with_legacy_v4(self) -> Self {
+        self.with_format_version(FormatVersion::V4)
     }
 
     /// 设置目标块大小（未压缩字节数），范围 `1..=MAX_BLOCK_SIZE`。
@@ -241,7 +312,7 @@ impl<W: Write> Encoder<W> {
         }
         let mut h = [0u8; HEADER_SIZE];
         h[0..3].copy_from_slice(&MAGIC);
-        h[3] = VERSION;
+        h[3] = self.format_version.as_u8();
         h[4] = self.level.as_u8();
         h[5] = FLAG_FOOTER; // bit0：存在尾部（校验和 + 总长）。
         if self.checksum.is_strong() {
@@ -296,16 +367,63 @@ impl<W: Write> Encoder<W> {
         }
         let blocks = std::mem::take(&mut self.pending);
         let n = blocks.len();
-        let compressed = match &self.cfg {
-            Some(cfg) => codec::compress_blocks_parallel(&self.dict, &blocks, cfg, self.threads),
-            None => blocks
-                .iter()
-                .map(|b| (BTYPE_STORED, b.clone()))
-                .collect::<Vec<_>>(),
-        };
-        for (i, block) in blocks.iter().enumerate() {
-            let (btype, cdata) = &compressed[i];
-            self.write_block(block, *btype, cdata, final_batch && i == n - 1)?;
+
+        // 解构 `self`，得到互不相交的字段借用：压缩流水线的工作线程只读 `dict`，
+        // 主线程回调写出则独占 `inner`/`checksum`/计数器，避免借用冲突。
+        let Encoder {
+            inner,
+            cfg,
+            threads,
+            checksum,
+            raw_total,
+            comp_total,
+            dict,
+            format_version,
+            ..
+        } = self;
+
+        match cfg {
+            Some(mcfg) => {
+                let mcfg = *mcfg;
+                let threads = *threads;
+                let fv = *format_version;
+                codec::compress_blocks_parallel_stream(
+                    dict.as_slice(),
+                    &blocks,
+                    &mcfg,
+                    threads,
+                    fv,
+                    &mut |i, btype, cdata| {
+                        let data = &blocks[i];
+                        let mut h = [0u8; BLOCK_HEADER_SIZE];
+                        h[0..4].copy_from_slice(&(data.len() as u32).to_le_bytes());
+                        h[4..8].copy_from_slice(&(cdata.len() as u32).to_le_bytes());
+                        h[8] = (final_batch && i == n - 1) as u8;
+                        h[9] = btype;
+                        inner.write_all(&h).map_err(io_to_rzp)?;
+                        inner.write_all(&cdata).map_err(io_to_rzp)?;
+                        *comp_total += BLOCK_HEADER_SIZE as u64 + cdata.len() as u64;
+                        checksum.update(data);
+                        *raw_total += data.len() as u64;
+                        Ok(())
+                    },
+                )?;
+            }
+            None => {
+                // 存储模式无压缩，直接顺序写出。
+                for (i, block) in blocks.iter().enumerate() {
+                    let mut h = [0u8; BLOCK_HEADER_SIZE];
+                    h[0..4].copy_from_slice(&(block.len() as u32).to_le_bytes());
+                    h[4..8].copy_from_slice(&(block.len() as u32).to_le_bytes());
+                    h[8] = (final_batch && i == n - 1) as u8;
+                    h[9] = BTYPE_STORED;
+                    inner.write_all(&h).map_err(io_to_rzp)?;
+                    inner.write_all(block).map_err(io_to_rzp)?;
+                    *comp_total += BLOCK_HEADER_SIZE as u64 + block.len() as u64;
+                    checksum.update(block);
+                    *raw_total += block.len() as u64;
+                }
+            }
         }
         Ok(())
     }
@@ -401,11 +519,13 @@ impl<W: Write> Write for Encoder<W> {
 }
 
 /// RZP 流式解码器。
-pub struct Decoder<R: Read> {
+pub struct Decoder<R: Read + Send> {
     inner: R,
     header_read: bool,
     finished: bool,
     level: u8,
+    /// 流头中记录的格式版本。
+    format_version: FormatVersion,
     /// 待输出的解压块队列（按原始顺序，队首为下一个要输出的块）。
     out: VecDeque<Vec<u8>>,
     /// 队首块内已输出的字节位置。
@@ -418,9 +538,11 @@ pub struct Decoder<R: Read> {
     comp_total: u64,
     dict: Vec<u8>,
     dir: bool,
+    /// 已预取的下一批块规格（读入-解压重叠）。
+    prefetched: Option<PrefetchedBatch>,
 }
 
-impl<R: Read> Decoder<R> {
+impl<R: Read + Send> Decoder<R> {
     /// 从读取器创建解码器（不使用预设字典）。
     pub fn new(inner: R) -> Self {
         Self::with_dictionary(inner, &[])
@@ -436,6 +558,7 @@ impl<R: Read> Decoder<R> {
             header_read: false,
             finished: false,
             level: 0,
+            format_version: FormatVersion::V4,
             out: VecDeque::new(),
             out_pos: 0,
             threads: crate::default_threads(),
@@ -445,6 +568,7 @@ impl<R: Read> Decoder<R> {
             comp_total: 0,
             dict: effective_dict(dict).to_vec(),
             dir: false,
+            prefetched: None,
         }
     }
 
@@ -470,6 +594,12 @@ impl<R: Read> Decoder<R> {
     /// 流头中记录的压缩级别。
     pub fn level(&self) -> Level {
         Level::from_u8(self.level)
+    }
+
+    /// 流头中记录的格式版本。
+    pub fn format_version(&mut self) -> Result<FormatVersion> {
+        self.read_header()?;
+        Ok(self.format_version)
     }
 
     /// 是否为「目录归档」负载（流头 `FLAG_DIR` 标志）。
@@ -505,9 +635,8 @@ impl<R: Read> Decoder<R> {
         if h[0..3] != MAGIC[..] {
             return Err(Error::Corrupt("bad magic bytes".into()));
         }
-        if h[3] != VERSION {
-            return Err(Error::Corrupt(format!("unsupported version {}", h[3])));
-        }
+        let format_version = FormatVersion::from_u8(h[3])
+            .ok_or_else(|| Error::Corrupt(format!("unsupported version {}", h[3])))?;
         if h[5] & FLAG_ENCRYPTED != 0 {
             return Err(Error::PasswordRequired);
         }
@@ -527,6 +656,7 @@ impl<R: Read> Decoder<R> {
         self.level = h[4];
         self.dir = h[5] & FLAG_DIR != 0;
         self.strong = h[5] & FLAG_BLAKE2B != 0;
+        self.format_version = format_version;
         self.checksum = if self.strong {
             Checksum::blake2b()
         } else {
@@ -538,59 +668,100 @@ impl<R: Read> Decoder<R> {
 
     /// 读取并解压一批块（含可能的尾部校验），填充 `out`。
     ///
-    /// 每次最多读取 `threads` 个块，并行解压后按原始顺序拼接。若本批读到
-    /// 结束块（`final_flag`），则随后读取并校验尾部。
+    /// 每次最多读取 `threads` 个块；解压与「读入下一批」在同一 [`std::thread::scope`]
+    /// 内并发进行，使磁盘读入与解压延迟重叠，解压结果仍按原始顺序输出。健壮性校验
+    /// （块尺寸上限、尾部校验、字典 CRC、损坏检测）语义不变。
     fn read_batch(&mut self) -> Result<()> {
         self.read_header()?;
 
-        // 收集本批的块规格：`(块类型, 块数据, 原始长度)`。
-        let mut specs: Vec<(u8, Vec<u8>, usize)> = Vec::with_capacity(self.threads);
-        let mut final_seen = false;
+        // 解构 `self`，取得互不相交的字段借用：解压工作线程只读 `dict`，预取读线程
+        // 独占 `inner`/`comp_total`，主线程回调则操作 `out`/`checksum`/计数器。
+        let Decoder {
+            inner,
+            header_read: _,
+            finished,
+            level: _,
+            format_version,
+            out,
+            out_pos,
+            threads,
+            checksum,
+            strong,
+            raw_total,
+            comp_total,
+            dict,
+            dir: _,
+            prefetched,
+        } = self;
 
-        for _ in 0..self.threads {
-            let mut bh = [0u8; BLOCK_HEADER_SIZE];
-            self.inner.read_exact(&mut bh).map_err(io_to_rzp)?;
-            self.comp_total += BLOCK_HEADER_SIZE as u64;
-            let raw_len = u32::from_le_bytes([bh[0], bh[1], bh[2], bh[3]]) as usize;
-            let comp_len = u32::from_le_bytes([bh[4], bh[5], bh[6], bh[7]]) as usize;
-            let final_flag = bh[8];
-            let btype = bh[9];
+        // 当前批：优先用上次预取的规格，否则现读。
+        let (current_specs, current_final) = match prefetched.take() {
+            Some(p) => (p.specs, p.final_seen),
+            None => read_specs(inner, *threads, comp_total)?,
+        };
 
-            // 健壮性：拒绝异常尺寸，防止损坏输入导致超量分配。
-            if raw_len > MAX_BLOCK_SIZE || comp_len > MAX_BLOCK_SIZE {
-                return Err(Error::InvalidSize(format!(
-                    "block size out of range: raw={raw_len} comp={comp_len}"
-                )));
-            }
+        let threads = *threads;
+        let format_version = *format_version;
+        let current_len = current_specs.len();
+        let dict_slice: &[u8] = dict.as_slice();
 
-            let mut cdata = vec![0u8; comp_len];
-            self.inner.read_exact(&mut cdata).map_err(io_to_rzp)?;
-            self.comp_total += comp_len as u64;
+        let (raws, next_prefetched): (Vec<Vec<u8>>, Option<PrefetchedBatch>) =
+            std::thread::scope(|scope| -> Result<_> {
+                // 解压工作线程：并行解压当前批，保持块顺序。
+                let mut handles = Vec::with_capacity(threads.max(1));
+                let chunk_size = current_len.div_ceil(threads.max(1));
+                for chunk in current_specs.chunks(chunk_size) {
+                    handles.push(scope.spawn(move || {
+                        chunk
+                            .iter()
+                            .map(|(bt, cd, rl)| {
+                                codec::decompress_block(*bt, cd, *rl, dict_slice, format_version)
+                            })
+                            .collect::<Result<Vec<_>>>()
+                    }));
+                }
 
-            specs.push((btype, cdata, raw_len));
-            if final_flag != 0 {
-                final_seen = true;
-                break;
-            }
-        }
+                // 预取下一批（仅当本批未读到结束块）。
+                let prefetch_handle = if current_final {
+                    None
+                } else {
+                    let inner = &mut *inner;
+                    let comp_total = &mut *comp_total;
+                    Some(scope.spawn(move || read_specs(inner, threads, comp_total)))
+                };
 
-        // 并行解压，保持块顺序；随后释放压缩数据，只保留解压块队列，避免 flatten
-        // 出一份完整副本，把峰值从「压缩 + 解压 + 拼接」降到仅「解压块队列」。
-        let raws = codec::decompress_blocks_parallel(&self.dict, &specs, self.threads)?;
-        drop(specs);
+                // 按顺序收集解压结果（释放压缩数据，只保留解压块队列，避免峰值翻倍）。
+                let mut raws = Vec::with_capacity(current_len);
+                for h in handles {
+                    raws.extend(h.join().expect("decompress worker panicked")?);
+                }
+
+                let next_prefetched = match prefetch_handle {
+                    Some(h) => {
+                        let (specs, final_seen) = h.join().expect("prefetch reader panicked")?;
+                        Some(PrefetchedBatch { specs, final_seen })
+                    }
+                    None => None,
+                };
+
+                Ok((raws, next_prefetched))
+            })?;
+
+        *prefetched = next_prefetched;
+
         for raw in &raws {
-            self.checksum.update(raw);
-            self.raw_total += raw.len() as u64;
+            checksum.update(raw);
+            *raw_total += raw.len() as u64;
         }
-        self.out = raws.into_iter().collect();
-        self.out_pos = 0;
+        *out = raws.into_iter().collect();
+        *out_pos = 0;
 
-        if final_seen {
-            if self.strong {
+        if current_final {
+            if *strong {
                 let mut foot = [0u8; FOOTER_STRONG_SIZE];
-                self.inner.read_exact(&mut foot).map_err(io_to_rzp)?;
-                self.comp_total += FOOTER_STRONG_SIZE as u64;
-                let digest = match &mut self.checksum {
+                inner.read_exact(&mut foot).map_err(io_to_rzp)?;
+                *comp_total += FOOTER_STRONG_SIZE as u64;
+                let digest = match checksum {
                     Checksum::Blake2b(b) => b.finalize(),
                     _ => unreachable!(),
                 };
@@ -602,35 +773,35 @@ impl<R: Read> Decoder<R> {
                         .try_into()
                         .expect("footer total is 8 bytes"),
                 );
-                if self.raw_total != total {
+                if *raw_total != total {
                     return Err(Error::InvalidSize(format!(
                         "size mismatch: expected {total}, got {}",
-                        self.raw_total
+                        *raw_total
                     )));
                 }
             } else {
                 let mut foot = [0u8; FOOTER_SIZE];
-                self.inner.read_exact(&mut foot).map_err(io_to_rzp)?;
-                self.comp_total += FOOTER_SIZE as u64;
+                inner.read_exact(&mut foot).map_err(io_to_rzp)?;
+                *comp_total += FOOTER_SIZE as u64;
                 let crc = u32::from_le_bytes([foot[0], foot[1], foot[2], foot[3]]);
                 let total = u64::from_le_bytes([
                     foot[4], foot[5], foot[6], foot[7], foot[8], foot[9], foot[10], foot[11],
                 ]);
-                let actual = match &self.checksum {
+                let actual = match checksum {
                     Checksum::Crc32(c) => c.finalize(),
                     _ => unreachable!(),
                 };
                 if actual != crc {
                     return Err(Error::ChecksumMismatch);
                 }
-                if self.raw_total != total {
+                if *raw_total != total {
                     return Err(Error::InvalidSize(format!(
                         "size mismatch: expected {total}, got {}",
-                        self.raw_total
+                        *raw_total
                     )));
                 }
             }
-            self.finished = true;
+            *finished = true;
         }
 
         Ok(())
@@ -676,7 +847,7 @@ impl<R: Read> Decoder<R> {
     }
 }
 
-impl<R: Read> Read for Decoder<R> {
+impl<R: Read + Send> Read for Decoder<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.pump(buf).map_err(rzp_to_io)
     }
@@ -717,6 +888,56 @@ mod tests {
     #[test]
     fn roundtrip_empty() {
         roundtrip(b"", Level::L6);
+    }
+
+    #[test]
+    fn pipeline_large_file_roundtrip() {
+        // 多块 + 多线程流水线：验证大文件经生产者-消费者流水线压缩后仍可无损往返，
+        // 且多线程不改变输出（checksum 也在解码端被校验）。
+        let mut data = Vec::new();
+        let mut seed = 0xdead_beefu32;
+        let total = BLOCK_SIZE * 3; // 3 MiB，横跨 3 个块、多次 flush。
+        for _ in 0..total {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            data.push((seed >> 24) as u8);
+        }
+        data.extend_from_slice(&[7u8; BLOCK_SIZE / 2]);
+
+        for threads in [1usize, 4] {
+            let mut enc = Encoder::new(Vec::new(), Level::L6).with_threads(threads);
+            enc.write_all(&data).unwrap();
+            let packed = enc.finish().unwrap();
+
+            let mut dec = Decoder::new(std::io::Cursor::new(packed)).with_threads(threads);
+            let mut out = Vec::new();
+            dec.read_to_end(&mut out).unwrap();
+            assert_eq!(out, data, "threads={threads}");
+        }
+    }
+
+    #[test]
+    fn decoder_threads_consistent() {
+        // 同一段压缩数据，用不同线程数解压（含读入预取路径），结果必须逐字节一致。
+        let mut data = Vec::new();
+        let mut seed = 0x1234_5678u32;
+        for _ in 0..(BLOCK_SIZE * 3) {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            data.push((seed >> 24) as u8);
+        }
+        data.extend_from_slice(&[7u8; BLOCK_SIZE / 2]);
+
+        let packed = crate::compress(&data, Level::L6);
+
+        let mut results = Vec::new();
+        for threads in [1usize, 2, 4] {
+            let mut dec = Decoder::new(Cursor::new(packed.clone())).with_threads(threads);
+            let mut out = Vec::new();
+            dec.read_to_end(&mut out).unwrap();
+            assert_eq!(out, data, "threads={threads}");
+            results.push(out);
+        }
+        assert_eq!(results[0], results[1]);
+        assert_eq!(results[0], results[2]);
     }
 
     #[test]
@@ -762,6 +983,17 @@ mod tests {
     #[test]
     fn rejects_bad_magic() {
         let mut dec = Decoder::new(Cursor::new(b"NOTRZP".to_vec()));
+        let mut out = Vec::new();
+        assert!(dec.read_to_end(&mut out).is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_version() {
+        // 版本 99 应被拒绝。
+        let mut bad = b"RZP".to_vec();
+        bad.push(99u8);
+        bad.extend_from_slice(&[6, 0x01, 0, 0]);
+        let mut dec = Decoder::new(Cursor::new(bad));
         let mut out = Vec::new();
         assert!(dec.read_to_end(&mut out).is_err());
     }
