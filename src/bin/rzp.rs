@@ -338,6 +338,7 @@ impl Opts {
 fn parse_opts(args: &[String]) -> Result<(Opts, Vec<String>)> {
     let mut level = Level::DEFAULT;
     let mut block_size = rzp::BLOCK_SIZE;
+    let mut block_size_explicit = false;
     let mut threads = rzp::default_threads();
     let mut force = false;
     let mut keep = false;
@@ -389,6 +390,7 @@ fn parse_opts(args: &[String]) -> Result<(Opts, Vec<String>)> {
                     )));
                 }
                 block_size = n;
+                block_size_explicit = true;
             }
             "-j" | "--threads" => {
                 i += 1;
@@ -500,6 +502,10 @@ fn parse_opts(args: &[String]) -> Result<(Opts, Vec<String>)> {
             s => positional.push(s.to_string()),
         }
         i += 1;
+    }
+
+    if !block_size_explicit {
+        block_size = level.default_block_size();
     }
 
     Ok((
@@ -1769,6 +1775,43 @@ fn run_pipe(program: &str, args: &[&str], input: &[u8]) -> Result<Vec<u8>> {
     Ok(output.stdout)
 }
 
+/// 判断字符在终端中是否按 2 列宽度显示（CJK / 全角等）。
+fn is_wide_char(c: char) -> bool {
+    matches!(
+        c,
+        '\u{1100}'..='\u{115F}'
+            | '\u{2E80}'..='\u{303E}'
+            | '\u{3041}'..='\u{33FF}'
+            | '\u{3400}'..='\u{4DBF}'
+            | '\u{4E00}'..='\u{9FFF}'
+            | '\u{A000}'..='\u{A4CF}'
+            | '\u{AC00}'..='\u{D7A3}'
+            | '\u{F900}'..='\u{FAFF}'
+            | '\u{FE30}'..='\u{FE4F}'
+            | '\u{FF00}'..='\u{FF60}'
+            | '\u{FFE0}'..='\u{FFE6}'
+            | '\u{20000}'..='\u{2FFFD}'
+            | '\u{30000}'..='\u{3FFFD}'
+    )
+}
+
+/// 计算字符串的终端显示宽度（CJK 等宽字符按 2 计）。
+fn display_width(s: &str) -> usize {
+    s.chars().map(|c| if is_wide_char(c) { 2 } else { 1 }).sum()
+}
+
+/// 按终端显示宽度左对齐填充到 `width`。
+fn pad_left(s: &str, width: usize) -> String {
+    let pad = width.saturating_sub(display_width(s));
+    format!("{s}{}", " ".repeat(pad))
+}
+
+/// 按终端显示宽度右对齐填充到 `width`。
+fn pad_right(s: &str, width: usize) -> String {
+    let pad = width.saturating_sub(display_width(s));
+    format!("{}{s}", " ".repeat(pad))
+}
+
 /// 打印基准报告（逐文件明细 + 汇总）。
 fn print_bench(rows: &[BenchRow]) {
     let tty = style::stdout_tty();
@@ -1779,16 +1822,28 @@ fn print_bench(rows: &[BenchRow]) {
     println!();
 
     let header = format!(
-        "{:<32} {:>12} {:>12} {:>10} {:>12} {:>12} {:>6}",
-        msgs().bench_header_file,
-        msgs().bench_header_orig,
-        msgs().bench_header_comp_size,
-        msgs().bench_header_ratio,
-        msgs().bench_header_comp_time,
-        msgs().bench_header_decomp_time,
-        msgs().bench_header_verify
+        "{} {} {} {} {} {} {}",
+        pad_left(msgs().bench_header_file, 32),
+        pad_right(msgs().bench_header_orig, 12),
+        pad_right(msgs().bench_header_comp_size, 12),
+        pad_right(msgs().bench_header_ratio, 10),
+        pad_right(msgs().bench_header_comp_time, 12),
+        pad_right(msgs().bench_header_decomp_time, 12),
+        pad_right(msgs().bench_header_verify, 6),
     );
     println!("{header}");
+
+    let divider = format!(
+        "{} {} {} {} {} {} {}",
+        "-".repeat(32),
+        "-".repeat(12),
+        "-".repeat(12),
+        "-".repeat(10),
+        "-".repeat(12),
+        "-".repeat(12),
+        "-".repeat(6),
+    );
+    println!("{divider}");
 
     for row in rows {
         let label = if row.name.len() > 32 {
@@ -1836,22 +1891,23 @@ fn print_bench(rows: &[BenchRow]) {
 
 fn print_tool(name: &str, t: &BenchTool, orig: u64, tty: bool) {
     if !t.available {
-        println!("{:<8} {:>12}", name, msgs().bench_na);
+        println!("{} {}", pad_left(name, 32), pad_right(&msgs().bench_na, 12));
         return;
     }
-    let ok = if t.decomp_ok {
-        style::paint("OK", style::Color::Green, tty)
+    let (ok_label, color) = if t.decomp_ok {
+        ("OK", style::Color::Green)
     } else {
-        style::paint("FAIL", style::Color::Red, tty)
+        ("FAIL", style::Color::Red)
     };
+    let ok = style::paint(&pad_right(ok_label, 6), color, tty);
     println!(
-        "{:<8} {:>12} {:>12} {:>10} {:>12} {:>12} {:>6}",
-        name,
-        human_size(orig),
-        human_size(t.comp_size),
-        pct(t.comp_size, orig),
-        dur(t.comp_time),
-        dur(t.decomp_time),
+        "{} {} {} {} {} {} {}",
+        pad_left(name, 32),
+        pad_right(&human_size(orig), 12),
+        pad_right(&human_size(t.comp_size), 12),
+        pad_right(&pct(t.comp_size, orig), 10),
+        pad_right(&dur(t.comp_time), 12),
+        pad_right(&dur(t.decomp_time), 12),
         ok,
     );
 }

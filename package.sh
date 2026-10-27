@@ -10,7 +10,7 @@
 #   ./package.sh
 #
 # 产物:
-#   dist/rzp-<版本>-<架构>.tar.gz               Linux 可移植二进制 + 文档 + 补全 + man page
+#   dist/rzp-<版本>-<架构>.tar.gz               Linux 可移植二进制 + 文档 + 补全 + man page + Nautilus 扩展
 #   target/debian/rzp_<版本>-1_<架构>.deb        Debian 安装包（需已安装 cargo-deb）
 #   dist/rzp-<版本>-x86_64-windows.zip           Windows 可移植二进制 + 文档（需 mingw-w64）
 #   dist/rzp-<版本>-x86_64-windows-setup.exe     Windows 安装包（需 mingw-w64 + NSIS）
@@ -65,6 +65,10 @@ done
 echo "==> 生成 man page"
 mkdir -p "$LINUX_STAGE/man"
 [ -f man/rzp.1 ] && cp -f man/rzp.1 "$LINUX_STAGE/man/rzp.1"
+
+echo "==> 收集 Nautilus 右键菜单扩展"
+mkdir -p "$LINUX_STAGE/nautilus-extensions"
+[ -f packaging/nautilus/rzp-menu.py ] && cp -f packaging/nautilus/rzp-menu.py "$LINUX_STAGE/nautilus-extensions/rzp-menu.py"
 
 echo "==> 生成 Linux 可移植 tar.gz"
 tar -C "$DIST" -czf "$DIST/rzp-$VERSION-$ARCH.tar.gz" "rzp-$VERSION-$ARCH"

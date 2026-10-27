@@ -195,6 +195,27 @@ impl Level {
             }),
         }
     }
+
+    /// 该级别默认使用的目标块大小（未压缩字节数）。
+    ///
+    /// 低等级保持 1 MiB（快速、内存友好、并行粒度细）；高等级（L7–L9）使用与
+    /// 匹配窗口一致的更大块，让 32 MiB 窗口真正生效——否则单块 1 MiB 会把匹配
+    /// 距离截断在 1 MiB 以内，跨块的长距离重复无法利用。
+    pub fn default_block_size(self) -> usize {
+        use crate::format::{BLOCK_SIZE, MAX_WINDOW_SIZE};
+        match self {
+            Level::L0
+            | Level::L1
+            | Level::L2
+            | Level::L3
+            | Level::L4
+            | Level::L5
+            | Level::L6 => BLOCK_SIZE,
+            Level::L7 => 4 * 1024 * 1024,
+            Level::L8 => 16 * 1024 * 1024,
+            Level::L9 => MAX_WINDOW_SIZE,
+        }
+    }
 }
 
 /// 一次性压缩：把整块数据压缩为 RZP 字节流。

@@ -18,7 +18,7 @@
 
 ```bash
 git clone <repo>
-cd RZP_2.0.0
+cd RZP_2.1.0
 cargo build --release          # 产物在 target/release/rzp
 
 # 交叉编译 Windows 版本（需先安装对应目标与 mingw-w64 链接器）
@@ -57,6 +57,24 @@ Windows（原生编译打包，需 PowerShell）：
 
 `rzp.exe` 的图标与文件版本信息由 [build.rs](build.rs) 在编译时嵌入（MSVC 用
 `rc.exe`，mingw 交叉编译用 `windres`）。
+
+### Nautilus 右键菜单（可选）
+
+在 GNOME 文件管理器右键菜单中集成「用 RZP 压缩 / 解压」：
+
+```bash
+# Debian/Ubuntu
+sudo apt install python3-nautilus python3-gi
+# Fedora
+sudo dnf install nautilus-python python3-gobject
+
+mkdir -p ~/.local/share/nautilus-python/extensions
+cp packaging/nautilus/rzp-menu.py ~/.local/share/nautilus-python/extensions/
+nautilus -q   # 重启文件管理器生效
+```
+
+扩展会调用 PATH 中的 `rzp` 二进制，始终保留源文件（`-k`）；若 `rzp` 不在
+PATH，可用环境变量 `RZP_BIN` 指向其绝对路径。
 
 ---
 

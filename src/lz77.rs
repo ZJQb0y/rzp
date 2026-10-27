@@ -676,6 +676,65 @@ impl CostModel {
             + self.dist_bits[sym] as u32
             + dextra
     }
+
+    /// 匹配（长度 + 距离）在给定 rep 状态下的估计码长。
+    ///
+    /// 与 [`CostModel::match_cost`] 的区别在于：V5 下若 `distance` 命中 `reps` 中的
+    /// 某个偏移，则按对应的 repcode 符号（0/1/2）计价，而非按完整距离码计价。这样
+    /// 最优解析才能识别「复用最近偏移」的低成本，从而更愿意选择能命中 rep 的匹配。
+    #[inline]
+    fn match_cost_rep(&self, length: usize, distance: usize, reps: &[usize; 3]) -> u32 {
+        let lc = length_code(length);
+        let lsym = (LEN_SYMBOL_BASE + lc) as usize;
+        let (sym, dextra) = match self.fv {
+            FormatVersion::V5 => {
+                if distance == reps[0] {
+                    (0usize, 0u32)
+                } else if distance == reps[1] {
+                    (1usize, 0u32)
+                } else if distance == reps[2] {
+                    (2usize, 0u32)
+                } else {
+                    let dc = dist_code_v5(distance);
+                    (
+                        (dc + REP_SYMBOLS as u16) as usize,
+                        V5_DIST_EXTRA_BITS[dc as usize] as u32,
+                    )
+                }
+            }
+            FormatVersion::V4 => {
+                let dc = dist_code(distance);
+                (dc as usize, DIST_EXTRA_BITS[dc as usize] as u32)
+            }
+        };
+        self.litlen_bits[lsym] as u32
+            + LENGTH_EXTRA_BITS[lc as usize] as u32
+            + self.dist_bits[sym] as u32
+            + dextra
+    }
+}
+
+/// 模拟编码端的 repcode 更新：把 `distance` 按 zstd 语义并入最近距离数组。
+///
+/// 必须与 [`crate::codec::encode_rep_symbol`] 的更新逻辑保持一致（命中 rep0 不变、
+/// rep1/rep2 提到首位、未命中则插入到首位并丢弃最旧者），否则代价模型会与实际
+/// 编码产生偏差。这里独立实现是因为 lz77 模块不能反向依赖 codec。
+#[inline]
+fn update_reps(reps: &mut [usize; 3], distance: usize) {
+    if distance == reps[0] {
+        // 命中 rep0：数组不变。
+    } else if distance == reps[1] {
+        reps.swap(0, 1);
+    } else if distance == reps[2] {
+        let r = reps[2];
+        reps[2] = reps[1];
+        reps[1] = reps[0];
+        reps[0] = r;
+    } else {
+        reps[2] = reps[1];
+        reps[1] = reps[0];
+        reps[0] = distance;
+    }
 }
 
 /// 用动态规划求整块数据的「最小估计代价」令牌序列（最优解析）。
@@ -865,6 +924,11 @@ fn compress_block_optimal_tree(
         let mut prev_dist = vec![0u32; n + 1];
         cost[0] = 0;
 
+        // 每个位置「最优路径」所携带的最近 3 个距离（rep 状态）。初始与编码端一致
+        // （见 `build_entries_and_freqs` 的 `reps = [1, 1, 1]`），用于让最优解析感知
+        // repcode 命中时的低成本，从而更愿意复用最近偏移。
+        let mut rep_state = vec![[1usize, 1, 1]; n + 1];
+
         // 复用「各匹配长度的最近距离」表；每轮只读取被 covered 覆盖的长度。
         let mut best_dist = [0u32; MAX_MATCH + 1];
         // 候选缓存：树自根（最远）向下（更近）遍历，先收集再逆序（近 → 远）填充，
@@ -882,6 +946,7 @@ fn compress_block_optimal_tree(
                 cost[k + 1] = cost[k] + lit_cost;
                 prev_len[k + 1] = 0;
                 prev_dist[k + 1] = 0;
+                rep_state[k + 1] = rep_state[k];
             }
 
             // 匹配转移：k -> k+len，枚举二分树中的候选（此时树内只含 < i 的位置）。
@@ -916,12 +981,17 @@ fn compress_block_optimal_tree(
                     }
                 }
 
+                let cur_reps = rep_state[k];
                 for len in MIN_MATCH..=covered {
-                    let c = cost[k] + cm.match_cost(len, best_dist[len] as usize);
+                    let dist = best_dist[len] as usize;
+                    let c = cost[k] + cm.match_cost_rep(len, dist, &cur_reps);
                     if c < cost[k + len] {
                         cost[k + len] = c;
                         prev_len[k + len] = len as u16;
                         prev_dist[k + len] = best_dist[len];
+                        let mut reps = cur_reps;
+                        update_reps(&mut reps, dist);
+                        rep_state[k + len] = reps;
                     }
                 }
             }

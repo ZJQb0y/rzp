@@ -1,6 +1,6 @@
 [package]
 name = "rzp"
-version = "2.0.0"
+version = "2.1.0"
 repository = "https://github.com/ZJQb0y/rzp"
 edition = "2021"
 description = "RZP — a from-scratch, streaming, integrity-checked compression format"
@@ -47,10 +47,14 @@ priority = "optional"
 # shared-mime-info 提供 update-mime-database 与 /usr/share/mime/packages 的 dpkg 触发器，
 # 安装/卸载时自动重建 MIME 数据库，使 .rzp 文件能显示对应图标。
 depends = ["$auto", "shared-mime-info"]
+# 右键菜单扩展的运行依赖；用 recommends 而非 depends，避免在无图形桌面的
+# 服务器上强制拉入整个 Nautilus。
+recommends = ["python3-nautilus", "python3-gi"]
 assets = [
     "$auto",
     ["packaging/mime/rzp.xml", "usr/share/mime/packages/rzp.xml", "644"],
     ["assets/rzp.svg", "usr/share/icons/hicolor/scalable/mimetypes/application-x-rzp.svg", "644"],
     ["assets/rzp.png", "usr/share/icons/hicolor/512x512/mimetypes/application-x-rzp.png", "644"],
+    ["packaging/nautilus/rzp-menu.py", "usr/share/nautilus-python/extensions/rzp-menu.py", "644"],
 ]
 maintainer-scripts = "packaging/debian"

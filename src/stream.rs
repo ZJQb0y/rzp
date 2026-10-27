@@ -13,7 +13,7 @@ use crate::crc32::{crc32, Crc32};
 use crate::crypto::blake2b::Blake2b;
 use crate::error::{Error, Result};
 use crate::format::{
-    FormatVersion, BLAKE2B_DIGEST_SIZE, BLOCK_HEADER_SIZE, BLOCK_SIZE, BTYPE_STORED, DICT_CRC_SIZE,
+    FormatVersion, BLAKE2B_DIGEST_SIZE, BLOCK_HEADER_SIZE, BTYPE_STORED, DICT_CRC_SIZE,
     FLAG_BLAKE2B, FLAG_DICT, FLAG_DIR, FLAG_ENCRYPTED, FLAG_FOOTER, FOOTER_SIZE,
     FOOTER_STRONG_SIZE, HEADER_SIZE, MAGIC, MAX_BLOCK_SIZE, MAX_WINDOW_SIZE,
 };
@@ -181,12 +181,13 @@ impl<W: Write> Encoder<W> {
     }
 
     fn with_config(inner: W, level: Level, dict: &[u8], dir: bool) -> Self {
+        let block_size = level.default_block_size();
         Encoder {
             inner,
             cfg: level.match_config(),
             level,
-            buf: Vec::with_capacity(BLOCK_SIZE * 2),
-            block_size: BLOCK_SIZE,
+            buf: Vec::with_capacity(block_size * 2),
+            block_size,
             pending: Vec::new(),
             threads: crate::default_threads(),
             checksum: Checksum::crc32(),
@@ -856,6 +857,7 @@ impl<R: Read + Send> Read for Decoder<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::format::BLOCK_SIZE;
     use std::io::Cursor;
 
     fn roundtrip(data: &[u8], level: Level) {

@@ -451,6 +451,10 @@ fn decode_fse_block(data: &[u8], raw_len: usize, dict: &[u8], fixed: bool) -> Re
     Ok(out.split_off(dict_len))
 }
 
+/// 最优解析的代价模型迭代上限：用上一轮令牌重建码长、再跑动态规划，
+/// 直到收敛（令牌序列不再变化）或达到此上限。收敛通常只需 1–2 轮。
+const OPT_ITERATIONS: usize = 3;
+
 /// 压缩一个块，返回 `(块类型, 块数据)`。
 ///
 /// 依次尝试动态 Huffman 与静态 Huffman，取较小者；若均不小于原始数据，
@@ -475,16 +479,24 @@ pub fn compress_block(
     cfg2.window_size = cfg.window_size.min(window_limit);
     let cfg = &cfg2;
 
-    // 最优解析：先用快速路径得到码长、构建代价模型，再用动态规划求最优令牌序列。
+    // 最优解析：先用快速路径得到初始令牌，再迭代——用上一轮令牌重建代价模型、
+    // 重新求最优令牌序列，直到收敛或达到迭代上限。
     let tokens = if cfg.optimal {
-        let first = lz77::compress_block(dict, data, cfg);
-        let (_, litlen_freqs, dist_freqs) = build_entries_and_freqs(&first, fv);
-        let cm = lz77::CostModel::new(
-            &huffman::compute_lengths(&litlen_freqs),
-            &huffman::compute_lengths(&dist_freqs),
-            fv,
-        );
-        lz77::compress_block_optimal(dict, data, cfg, &cm)
+        let mut tokens = lz77::compress_block(dict, data, cfg);
+        for _ in 0..OPT_ITERATIONS {
+            let (_, litlen_freqs, dist_freqs) = build_entries_and_freqs(&tokens, fv);
+            let cm = lz77::CostModel::new(
+                &huffman::compute_lengths(&litlen_freqs),
+                &huffman::compute_lengths(&dist_freqs),
+                fv,
+            );
+            let next = lz77::compress_block_optimal(dict, data, cfg, &cm);
+            if next == tokens {
+                break;
+            }
+            tokens = next;
+        }
+        tokens
     } else {
         lz77::compress_block(dict, data, cfg)
     };
